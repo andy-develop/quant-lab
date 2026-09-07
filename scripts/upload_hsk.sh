@@ -26,5 +26,7 @@ if echo "$OUT" | grep -q '"message":"ok"'; then
     echo "$(date '+%F %T') 上传成功 -> https://kpqv8z.gicp.fun (${SIZE} bytes)" >> "$LOG"
 else
     echo "$(date '+%F %T') 上传失败: $OUT" >> "$LOG"
+    echo "[upload_hsk] 失败详情:" >&2
+    echo "$OUT" >&2
     exit 1
 fi
