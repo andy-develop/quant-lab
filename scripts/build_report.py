@@ -57,12 +57,20 @@ def main():
     trades = trades[trades["exit_date"] >= start_day].reset_index(drop=True)
 
     # ---- 待买清单: 最后交易日的信号 ----
-    last_sigs = sigs[sigs["date"] == last_day].sort_values("score", ascending=False)
+    last_sigs = sigs[sigs["date"] == last_day].sort_values("score", ascending=False).reset_index(drop=True)
+    last_sigs["rank"] = last_sigs.index + 1          # 当日候选排名 (评分第1名起)
     pending = last_sigs.head(20).to_dict("records")
     for x in pending:
         x["code"] = x["code"][-6:]
         x["strategy_cn"] = STRAT_CN[x["strategy"]]
         x["date"] = str(pd.Timestamp(x["date"]).date())
+
+    # ---- 大盘状态 (建议仓位用) ----
+    reg_state, reg_ratio = "-", 0.0
+    if os.path.exists(f"{META}/market_regime.parquet"):
+        _reg = pd.read_parquet(f"{META}/market_regime.parquet")
+        reg_state = str(_reg.iloc[-1]["state"])
+        reg_ratio = float(_reg.iloc[-1]["target_ratio"])
 
     # ---- 下个交易日卖出计划: 收盘已挂单的持仓 ----
     sell_plan = []
@@ -144,7 +152,8 @@ def main():
              "entry_px": float(r["entry_px"]), "exit_px": float(r["exit_px"]),
              "shares": int(r["shares"]),
              "pnl_pct": float(r["pnl_pct"]), "pnl_cny": float(r["pnl_cny"]),
-             "reason": REASON_CN.get(r["reason"], r["reason"]), "hold_days": int(r["hold_days"])}
+             "reason": REASON_CN.get(r["reason"], r["reason"]), "hold_days": int(r["hold_days"]),
+             "buy_rank": int(r["buy_rank"]) if "buy_rank" in r else 0}
             for _, r in trades.sort_values("exit_date", ascending=False).iterrows()
         ],
         "holdings": [
@@ -157,6 +166,8 @@ def main():
         "pending": pending,
         "sell_plan": sell_plan,
         "risk_list": risk_list,
+        "reg_state": reg_state,
+        "reg_ratio": reg_ratio,
     }
 
     html = render_html(payload)
@@ -274,6 +285,8 @@ th{text-align:left;color:var(--muted);font-weight:500;padding:6px 8px;border-bot
 td{padding:6px 8px;border-bottom:1px solid #F0EFE9;font-variant-numeric:tabular-nums;white-space:nowrap;}
 tr:hover td{background:#FAFAF7;}
 .grid2{display:grid;grid-template-columns:1.2fr 1fr;gap:14px;}
+.sub-h{font-size:13px;font-weight:600;margin:16px 0 6px;color:#26251F;border-left:3px solid #534AB7;padding-left:8px;}
+.sub-h:first-of-type{margin-top:4px;}
 .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;}
 .tg-a{background:#E6F1FB;color:#185FA5;} .tg-b{background:#E1F5EE;color:#0F6E56;} .tg-c{background:#EEEDFE;color:#534AB7;}
 .warn{background:#FAEEDA;border:1px solid #EF9F27;border-radius:10px;padding:10px 14px;font-size:12.5px;color:#633806;margin-bottom:14px;}
@@ -299,15 +312,19 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 
 <div class="grid2">
 <div class="card"><h2>卖出原因分布 <span class="note">(所选区间)</span></h2><div class="chart2" id="reasonChart"></div></div>
-<div class="card"><h2>下一交易日卖出计划 <span class="note" id="sellNote"></span></h2><table id="sellTable"></table></div>
+<div class="card"><h2>买入原因分布 <span class="note">(所选区间 · 按当日候选评分排名)</span></h2><table id="buyReasonTable"></table></div>
 </div>
 
-<div class="card"><h2>卖出风险预警 <span class="note" id="riskNote"></span></h2><table id="riskTable"></table></div>
+<div class="card"><h2>下一交易日计划 <span class="note" id="planNote"></span></h2>
+<div class="sub-h">① 确定卖出（收盘已挂卖单, 下一开盘执行）</div>
+<table id="planSell"></table>
+<div class="sub-h">② 有可能卖出（距卖出条件很近, 仅供预警）</div>
+<table id="planRisk"></table>
+<div class="sub-h">③ 有可能买入（T日收盘信号候选, 附买入条件与建议仓位）</div>
+<table id="planBuy"></table>
+</div>
 
-<div class="grid2">
 <div class="card"><h2>当前持仓 <span class="note" id="holdNote"></span></h2><table id="holdTable"></table></div>
-<div class="card"><h2>下一交易日候选 <span class="note">(T日收盘信号, 按评分排序)</span></h2><table id="pendTable"></table></div>
-</div>
 
 <div class="card"><h2>交易明细 <span class="note" id="tradeNote"></span></h2><table id="tradeTable"></table></div>
 
@@ -421,29 +438,48 @@ function tables(tr){
     `<thead><tr><th>代码</th><th>名称</th><th>策略</th><th>买入日</th><th>买价</th><th>股数</th><th>市值(¥)</th><th>持有</th><th>浮动盈亏</th></tr></thead><tbody>`+
     (D.holdings.map(h=>`<tr><td>${h.code}</td><td>${h.name}</td><td>${h.strategy_cn}</td><td>${h.entry_date}</td><td>${h.entry_px.toFixed(2)}</td><td>${h.shares.toLocaleString()}</td><td>${nf(h.value)}</td><td>${h.hold_days}天</td><td class="${cls(h.pnl_pct)}">${fmtPct(h.pnl_pct)}</td></tr>`).join('')||'<tr><td colspan=9 class="note">空仓</td></tr>')+'</tbody>';
   document.getElementById('holdNote').textContent = `(${D.last_day} 收盘 · 股数按整手交易, 1手=100股)`;
-  // 下一交易日卖出计划
+  // 下一交易日计划
+  document.getElementById('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行 · 大盘状态 ${D.reg_state}, 目标仓位 ${(D.reg_ratio*100).toFixed(0)}%)`;
   const sp = D.sell_plan || [];
-  document.getElementById('sellTable').innerHTML =
+  document.getElementById('planSell').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>卖出条件</th></tr></thead><tbody>`+
     (sp.map(s=>`<tr><td>${s.code}</td><td>${s.name}</td><td>${s.entry_date}</td><td>${s.hold_days}天</td><td class="${cls(s.pnl_pct)}">${fmtPct(s.pnl_pct)}</td><td><b>${s.reason}</b> · ${s.condition}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">收盘时无待卖持仓, 下个交易日不卖出</td></tr>')+'</tbody>';
-  document.getElementById('sellNote').textContent = `(${D.last_day} 收盘判定, 下一开盘执行)`;
-  // 卖出风险预警
   const rl = D.risk_list || [];
-  document.getElementById('riskTable').innerHTML =
+  document.getElementById('planRisk').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>风险提示</th></tr></thead><tbody>`+
     (rl.map(r=>`<tr><td>${r.code}</td><td>${r.name}</td><td>${r.entry_date}</td><td>${r.hold_days}天</td><td class="${cls(r.pnl_pct)}">${fmtPct(r.pnl_pct)}</td><td>${r.risks.map(x=>'<span style="color:#633806">⚠</span> '+x).join('<br>')}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">当前无接近卖出条件的持仓</td></tr>')+'</tbody>';
-  document.getElementById('riskNote').textContent = `(未挂单但距卖出条件≤2%或2日内到期的持仓, 仅供预警, 以收盘判定为准)`;
-  // 候选
-  document.getElementById('pendTable').innerHTML =
-    `<thead><tr><th>代码</th><th>名称</th><th>策略</th><th>评分</th></tr></thead><tbody>`+
-    (D.pending.map(p=>`<tr><td>${p.code}</td><td>${p.name}</td><td>${p.strategy_cn}</td><td>${p.score.toFixed(2)}</td></tr>`).join('')||'<tr><td colspan=4 class="note">最后交易日无信号</td></tr>')+'</tbody>';
+  const ratioPct = (D.reg_ratio*100).toFixed(0);
+  const perStock = D.reg_ratio>0 ? '单只 ≤ 10% 总资金 (整手买入, 最低1手)' : '—';
+  const buyCond = D.reg_ratio>0
+    ? `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 总仓位不超过 ${ratioPct}% (${D.reg_state})`
+    : `大盘处于空仓状态 (Z0), 暂不开新仓; 待状态机回升至 Z1 及以上恢复买入`;
+  document.getElementById('planBuy').innerHTML =
+    `<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>评分</th><th>建议仓位</th><th>买入条件</th></tr></thead><tbody>`+
+    (D.pending.map(p=>`<tr><td>第${p.rank}名</td><td>${p.code}</td><td>${p.name}</td><td>${p.score.toFixed(3)}</td><td>${perStock}</td><td>${buyCond}</td></tr>`).join('')
+     ||'<tr><td colspan=6 class="note">最后交易日无信号, 下个交易日无新开仓计划</td></tr>')+'</tbody>';
+}
+
+function drawBuyReasons(tr){
+  const lab = r => r===1 ? '当日候选第1名 (评分最高)' : r===2 ? '当日候选第2名' : r===3 ? '当日候选第3名' : '第4名及以后 (前列被涨停/停牌跳过后买入)';
+  const order = ['当日候选第1名 (评分最高)','当日候选第2名','当日候选第3名','第4名及以后 (前列被涨停/停牌跳过后买入)'];
+  const groups = {};
+  tr.forEach(t=>{ const k = lab(t.buy_rank||0); (groups[k]=groups[k]||[]).push(t); });
+  const rows = order.filter(k=>groups[k]).map(k=>{
+    const g = groups[k], n = g.length;
+    const w = g.filter(x=>x.pnl_pct>0).length/n;
+    const avg = g.reduce((a,x)=>a+x.pnl_pct,0)/n;
+    const pnl = g.reduce((a,x)=>a+x.pnl_cny,0);
+    return `<tr><td>${k}</td><td>${n}</td><td class="${w>=0.5?'up':'down'}">${(w*100).toFixed(1)}%</td><td class="${cls(avg)}">${fmtPct(avg)}</td><td class="${cls(pnl)}">${nf(pnl)}</td></tr>`;
+  }).join('');
+  document.getElementById('buyReasonTable').innerHTML =
+    `<thead><tr><th>买入原因</th><th>笔数</th><th>胜率</th><th>平均收益</th><th>盈亏合计(¥)</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class="note">该区间无交易</td></tr>'}</tbody>`;
 }
 
 function renderAll(){
   const tr = kpis();
-  drawEquity(); drawReasons(tr); tables(tr);
+  drawEquity(); drawReasons(tr); drawBuyReasons(tr); tables(tr);
 }
 
 document.getElementById('sub').textContent =
