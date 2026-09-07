@@ -49,6 +49,7 @@ def main():
     if len(eq) > WINDOW_DAYS:
         eq = eq.iloc[-WINDOW_DAYS:]
         bench = bench.reindex(eq.index).ffill()
+        bench1000 = bench1000.reindex(eq.index).ffill()   # 必须与 eq 同步截断, 否则前端窗口切片错位
     start_day = eq.index[0]
     trades = trades[trades["exit_date"] >= start_day].reset_index(drop=True)
 
