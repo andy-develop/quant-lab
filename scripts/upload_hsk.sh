@@ -8,9 +8,9 @@ REPORT="$(cd "$(dirname "$0")/.." && pwd)/report/index.html"
 RESOURCE_ID="${HSK_RESOURCE_ID:-1788744899319110368}"
 LOG="$(cd "$(dirname "$0")/.." && pwd)/data/meta/upload_hsk.log"
 
-# 本地缺省 hsk-cli 路径不存在时 (如 CI), 回退到 npx
+# 本地缺省 hsk-cli 路径不存在时 (如 CI), 回退到 npx (npm 上 0.4.6 不存在, 用 0.4.13)
 if [ ! -x "$HSK" ]; then
-    HSK="npx -y @aweray/hsk-cli@0.4.6"
+    HSK="npx -y @aweray/hsk-cli@0.4.13"
 fi
 
 [ -f "$REPORT" ] || { echo "$(date '+%F %T') 报告不存在: $REPORT" >> "$LOG"; exit 1; }
