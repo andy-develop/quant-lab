@@ -110,11 +110,12 @@ def update_kline():
         return target_day
     # 指数快照 -> 追加指数日线 (下个交易日历前提)
     try:
-        r = s.get("https://qt.gtimg.cn/q=sh000001,sh000300", timeout=15)
+        r = s.get("https://qt.gtimg.cn/q=sh000001,sh000300,sh000852", timeout=15)
         r.encoding = "gbk"
         idx_rows = []
         for sym, p in [("sh000001", f"{META}/index_daily.parquet"),
-                       ("sh000300", f"{META}/bench_daily.parquet")]:
+                       ("sh000300", f"{META}/bench_daily.parquet"),
+                       ("sh000852", f"{META}/csi1000_daily.parquet")]:
             parts = [x for x in r.text.split(";") if x.startswith(f"v_{sym}=")][0]
             parts = parts.split("=", 1)[1].strip('"').split("~")
             idx_rows.append((p, {"date": target_day, "open": float(parts[5]), "close": float(parts[3]),

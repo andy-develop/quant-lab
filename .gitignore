@@ -20,3 +20,4 @@ data/pool/
 __pycache__/
 *.pyc
 .DS_Store
+data/meta/market_regime_csi1000.parquet

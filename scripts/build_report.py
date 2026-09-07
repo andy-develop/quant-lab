@@ -38,6 +38,14 @@ def main():
     eq = pd.read_csv(f"{META}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
     bench = pd.read_parquet(f"{META}/bench_daily.parquet").set_index("date")["close"]
     bench = bench.reindex(eq.index).ffill()
+    # 中证1000 基准 (缺失时退化为沪深300)
+    p1000 = f"{META}/csi1000_daily.parquet"
+    if os.path.exists(p1000):
+        _c = pd.read_parquet(p1000)
+        _c["date"] = pd.to_datetime(_c["date"])
+        bench1000 = _c.set_index("date")["close"].reindex(eq.index).ffill()
+    else:
+        bench1000 = bench
     trades = pd.read_parquet(f"{META}/trades.parquet")
     trades["entry_date"] = pd.to_datetime(trades["entry_date"])
     trades["exit_date"] = pd.to_datetime(trades["exit_date"])
@@ -155,6 +163,7 @@ def main():
         "dates": [str(d.date()) for d in eq.index],
         "equity": [round(float(v), 2) for v in eq.values],
         "bench": [round(float(v / bench.iloc[0] * eq.iloc[0]), 2) for v in bench.values],
+        "bench1000": [round(float(v / bench1000.iloc[0] * eq.iloc[0]), 2) for v in bench1000.values],
         "start_cap": 1000000,
         "trades": [
             {"code": r["code"][-6:], "name": r["name"], "strategy": r["strategy"],
@@ -232,6 +241,7 @@ STRAT_DOC = """
 </tbody>
 </table>
 <p>除状态切换外，同状态内仓位阶梯回落：重仓破 10 日线降半仓、破 20 日线降轻仓。近一年该状态机触发「逃顶清仓」88 次（Z0 空仓天数占比约 31%），是回撤控制的主要来源。</p>
+<p><b>锚定指数 A/B 结论</b>：曾将状态机锚定切换为中证1000（与持仓小盘动量股相关性更高）做对照实验——全期收益 +30.1% vs 上证锚定 +28.9% 略优，但最大回撤恶化至 -37.8%（vs -31.1%），且分年不稳（2025 年由 +4.6 万转为 -10.8 万）。不满足「分年不劣于基线」的上线纪律，故维持<b>上证指数锚定</b>。核心指标对比表中的「中证1000长持」仅作为策略收益的对照基准（中证1000 与本策略持仓风格更接近，是比沪深300 更严格的对照组）。</p>
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
@@ -360,7 +370,8 @@ document.getElementById('rangeTabs').addEventListener('click', e => {
 function slice(){
   const n = rangeN === 0 ? D.dates.length : rangeN + 1;
   const s = Math.max(0, D.dates.length - n);
-  return {dates: D.dates.slice(s), equity: D.equity.slice(s), bench: D.bench.slice(s), start: D.dates[s]};
+  return {dates: D.dates.slice(s), equity: D.equity.slice(s), bench: D.bench.slice(s),
+          bench1000: (D.bench1000 || D.bench).slice(s), start: D.dates[s]};
 }
 
 function kpis(){
@@ -389,12 +400,20 @@ function kpis(){
   const bSd = Math.sqrt(bDaily.reduce((x,y)=>x+(y-bMean)**2,0)/Math.max(bDaily.length-1,1));
   const bSharpe = bSd>0 ? bMean/bSd*Math.sqrt(244) : 0;
   let bPeak=b[0], bMdd=0; for(const v of b){bPeak=Math.max(bPeak,v); bMdd=Math.min(bMdd, v/bPeak-1);}
+  // 中证1000长持 (同期买入持有)
+  const c = sl.bench1000, cn = c.length - 1;
+  const cTotal = c[c.length-1]/c[0]-1;
+  const cDaily = []; for(let i=1;i<c.length;i++) cDaily.push(c[i]/c[i-1]-1);
+  const cMean = cDaily.reduce((x,y)=>x+y,0)/Math.max(cDaily.length,1);
+  const cSd = Math.sqrt(cDaily.reduce((x,y)=>x+(y-cMean)**2,0)/Math.max(cDaily.length-1,1));
+  const cSharpe = cSd>0 ? cMean/cSd*Math.sqrt(244) : 0;
+  let cPeak=c[0], cMdd=0; for(const v of c){cPeak=Math.max(cPeak,v); cMdd=Math.min(cMdd, v/cPeak-1);}
   document.getElementById('kpiTable').innerHTML =
-    `<thead><tr><th>指标</th><th>本策略</th><th>沪深300长持</th></tr></thead><tbody>`+
-    `<tr><td>区间收益</td><td class="${cls(total)}"><b>${fmtPct(total)}</b></td><td class="${cls(bTotal)}">${fmtPct(bTotal)}</td></tr>`+
-    `<tr><td>最大回撤</td><td class="down"><b>${fmtPct(mdd)}</b></td><td class="down">${fmtPct(bMdd)}</td></tr>`+
-    `<tr><td>夏普比率</td><td class="${sharpe>=1?'up':''}"><b>${sharpe.toFixed(2)}</b></td><td>${bSharpe.toFixed(2)}</td></tr>`+
-    `<tr><td>胜率 <span class="note">${tr.length}笔 · 盈亏比${pf.toFixed(2)}</span></td><td class="${win>=0.5?'up':'down'}"><b>${(win*100).toFixed(1)}%</b></td><td class="note">— (长持无此口径)</td></tr>`+
+    `<thead><tr><th>指标</th><th>本策略</th><th>沪深300长持</th><th>中证1000长持</th></tr></thead><tbody>`+
+    `<tr><td>区间收益</td><td class="${cls(total)}"><b>${fmtPct(total)}</b></td><td class="${cls(bTotal)}">${fmtPct(bTotal)}</td><td class="${cls(cTotal)}">${fmtPct(cTotal)}</td></tr>`+
+    `<tr><td>最大回撤</td><td class="down"><b>${fmtPct(mdd)}</b></td><td class="down">${fmtPct(bMdd)}</td><td class="down">${fmtPct(cMdd)}</td></tr>`+
+    `<tr><td>夏普比率</td><td class="${sharpe>=1?'up':''}"><b>${sharpe.toFixed(2)}</b></td><td>${bSharpe.toFixed(2)}</td><td>${cSharpe.toFixed(2)}</td></tr>`+
+    `<tr><td>胜率 <span class="note">${tr.length}笔 · 盈亏比${pf.toFixed(2)}</span></td><td class="${win>=0.5?'up':'down'}"><b>${(win*100).toFixed(1)}%</b></td><td class="note">—</td><td class="note">—</td></tr>`+
     `</tbody>`;
   return tr;
 }

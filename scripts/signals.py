@@ -80,12 +80,15 @@ def build_indicators(qfq, raw):
     return df
 
 
-def market_regime():
-    """买卖点仓位状态机 (锚定上证指数) -> 每日目标仓位比例
+def market_regime(index_file=None, out_file=None):
+    """买卖点仓位状态机 -> 每日目标仓位比例 (默认锚定上证指数)
     参考: 用户腾讯文档《买卖点》(docs.qq.com/doc/DWGdJeWR0amRjc3ZC)
     Z0 空仓 / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%
+    index_file/out_file: 可替换锚定指数 (如中证1000 csi1000_daily.parquet)
     """
-    idx = pd.read_parquet(f"{BASE}/data/meta/index_daily.parquet").sort_values("date").reset_index(drop=True)
+    index_file = index_file or f"{BASE}/data/meta/index_daily.parquet"
+    out_file = out_file or f"{BASE}/data/meta/market_regime.parquet"
+    idx = pd.read_parquet(index_file).sort_values("date").reset_index(drop=True)
     c = idx["close"]
     ma5, ma10, ma20 = c.rolling(5).mean(), c.rolling(10).mean(), c.rolling(20).mean()
     ma5p, ma10p = ma5.shift(1), ma10.shift(1)
@@ -121,9 +124,10 @@ def market_regime():
         prev = cur
     out = pd.DataFrame({"date": pd.to_datetime(idx["date"]), "state": states})
     out["target_ratio"] = out["state"].map({"Z0": 0.0, "Z1": 0.3, "Z2": 0.5, "Z3": 1.0})
-    out.to_parquet(f"{BASE}/data/meta/market_regime.parquet", index=False)
+    out.to_parquet(out_file, index=False)
     dist = out["state"].value_counts().to_dict()
-    print(f"大盘状态机: {dist}  (最新 {out['date'].iloc[-1]:%Y-%m-%d} = {out['state'].iloc[-1]})", flush=True)
+    print(f"大盘状态机({out_file.split('/')[-1]}): {dist}  "
+          f"(最新 {out['date'].iloc[-1]:%Y-%m-%d} = {out['state'].iloc[-1]})", flush=True)
     return out
 
 

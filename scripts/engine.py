@@ -53,7 +53,7 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0):
+def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, regime_file=None):
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -73,9 +73,10 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0):
 
     strat_break = {"momentum": "break_c"}
 
-    # 大盘仓位状态机 (买卖点, 锚定上证指数)
+    # 大盘仓位状态机 (买卖点, 默认锚定上证指数; regime_file 可替换如中证1000)
     # 关键: 状态由 T 日收盘计算, T 日开盘不可见 -> 必须平移一日, 用 T-1 收盘状态驱动 T 日开盘动作 (防未来函数)
-    regime = pd.read_parquet(f"{BASE}/data/meta/market_regime.parquet")
+    regime_file = regime_file or f"{BASE}/data/meta/market_regime.parquet"
+    regime = pd.read_parquet(regime_file)
     regime["date"] = pd.to_datetime(regime["date"])
     regime = regime.set_index("date")["target_ratio"].shift(1)
 
