@@ -1,18 +1,21 @@
-import os
 #!/usr/bin/env python3
 """日线组合回测引擎。A股规则内建:
   - T日收盘出信号 -> T+1开盘成交
   - 开盘涨停(开盘价>=涨停价)无法买入 -> 放弃
   - 开盘跌停无法卖出 -> 顺延至下一开盘
   - 停牌(当日无K线)跳过
-  - 成本: 佣金万1双边 + 印花税0.05%(卖出) + 滑点0.1%单边
+  - 成本: 佣金万1双边(最低5元) + 印花税0.05%(卖出) + 滑点0.1%单边
   - 仓位控制: 每日最多买入3只; 总仓位锚定上证指数买卖点状态机
     (Z0空仓0%且清仓 / Z1轻仓30% / Z2半仓50% / Z3重仓100%), 见 signals.market_regime
   - T+1: 买入次日不可卖(引擎天然满足: 卖出信号在收盘判定, 最早次日开盘执行)
 会计口径: 后复权价格(hfq, 连续且历史值永久冻结)做信号/涨跌停判定/估值/现金流;
 交易流水展示不复权价。hfq 与 qfq 的区间收益率完全一致(复权因子在比值中约掉)。
 预算控制: 持仓市值实时按最近收盘价重算(不维护增量记账, 避免已实现盈亏泄漏)。
+注: 趋势破位(破MA20)退出规则已于 2026-09-07 移除 —— A/B 证实纯负贡献
+(74笔合计-17.7万, 删除后全期 +22.5% -> +32.2%, 夏普 0.39 -> 0.49)。
 """
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -23,7 +26,6 @@ MAX_BUY_PER_DAY = 3      # 每日新开仓上限
 START_CAP = 1_000_000.0
 STOP_PCT = 0.92          # 止损: 收盘 <= 买入价*0.92
 MAX_HOLD = 10            # 最长持有交易日
-MIN_HOLD_BREAK = 3       # 趋势破位最小持有
 MIN_HOLD_SHRINK = 2      # 放量滞涨最小持有
 COMM, STAMP, SLIP = 0.0001, 0.0005, 0.001
 MIN_FEE = 5.0            # 单笔佣金最低 5 元
@@ -46,7 +48,7 @@ def load_wide():
     fl = pd.read_parquet(f"{BASE}/data/meta/flags_long.parquet")
     fl["date"] = pd.to_datetime(fl["date"])
     piv = {}
-    for col in ["open", "close", "raw_close", "raw_open", "break_c", "shrink"]:
+    for col in ["open", "close", "raw_close", "raw_open", "shrink"]:
         p = fl.pivot(index="date", columns="code", values=col)
         piv[col] = p
     return piv
@@ -64,7 +66,7 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, regime_file=None):
+def run_backtest(start=None, regime_file=None):
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -83,12 +85,9 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
     no_buy = open_ret >= (pct_frame - 0.002)          # 开盘涨停/接近一字 -> 买不进
     no_sell = open_ret <= -(pct_frame - 0.002)        # 开盘跌停 -> 卖不出
 
-    strat_break = {"momentum": "break_c"}
-
     # 大盘仓位状态机 (买卖点, 默认锚定上证指数; regime_file 可替换如中证1000)
     # 关键: 状态由 T 日收盘计算, T 日开盘不可见 -> 必须平移一日, 用 T-1 收盘状态驱动 T 日开盘动作 (防未来函数)
-    regime_file = regime_file or f"{BASE}/data/meta/market_regime.parquet"
-    regime = pd.read_parquet(regime_file)
+    regime = pd.read_parquet(regime_file or f"{BASE}/data/meta/market_regime.parquet")
     regime["date"] = pd.to_datetime(regime["date"])
     regime = regime.set_index("date")["target_ratio"].shift(1)
 
@@ -146,7 +145,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
             cl_ = pos_.get("last_close", np.nan)
             mv += pos_["shares"] * (cl_ if not np.isnan(cl_) else pos_["entry_adj"])
         cands = []
-        if prev_day is not None and ratio >= max(min_buy_ratio, 0.001):
+        if prev_day is not None and ratio >= 0.001:
             for strat, sw in sig_w.items():
                 if prev_day in sw.index:
                     row = sw.loc[prev_day].dropna()
@@ -206,39 +205,16 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
             if code in pending_sells:
                 continue
             reason = None
-            if quick_fail and pos["hold_days"] == 1 and pnl_pct <= quick_fail:
-                reason = "quick_fail"      # 快速认错: 首日收盘浮亏超阈值, 次日开盘退出
-            elif not np.isnan(cl) and cl <= pos["entry_adj"] * STOP_PCT:
+            if not np.isnan(cl) and cl <= pos["entry_adj"] * STOP_PCT:
                 reason = "stop_loss"
             elif pos["hold_days"] >= MAX_HOLD:
                 reason = "expired"
-            elif pos["hold_days"] >= MIN_HOLD_BREAK:
-                bcol = strat_break[pos["strategy"]]
-                bv = piv[bcol].at[day, code] if code in piv[bcol].columns else False
-                if bool(bv):
-                    reason = "trend_break"
-            if reason is None and pos["hold_days"] >= MIN_HOLD_SHRINK:
+            elif pos["hold_days"] >= MIN_HOLD_SHRINK:
                 sv = piv["shrink"].at[day, code] if code in piv["shrink"].columns else False
                 if bool(sv):
                     reason = "vol_shrink"
             if reason:
                 pending_sells[code] = reason
-
-        # ---------- 仓位回归 (实验, de_risk_pt>0 启用): 实际仓位超目标 de_risk_pt -> 次日开盘卖最弱 ----------
-        if de_risk_pt > 0 and ratio > 0:
-            def _val(p):
-                cl = p["last_close"]
-                return p["shares"] * (cl if not np.isnan(cl) else p["entry_adj"])
-            mv = total - cash
-            budget = total * ratio
-            if mv > budget * (1 + de_risk_pt):
-                for code, pos in sorted(positions.items(), key=lambda kv: _val(kv[1]) / kv[1]["cost"]):
-                    if mv <= budget:
-                        break
-                    if code in pending_sells:
-                        continue
-                    pending_sells[code] = "de_risk"
-                    mv -= _val(pos)
 
         equity.append((day, total))
         if snap:

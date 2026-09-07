@@ -11,10 +11,9 @@ import pandas as pd
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根目录(本地/CI通用)
 META, POOL = f"{BASE}/data/meta", f"{BASE}/data/pool"
 STRAT_CN = {"momentum": "动量轮动"}
-REASON_CN = {"stop_loss": "止损", "trend_break": "趋势破位", "vol_shrink": "放量滞涨",
+REASON_CN = {"stop_loss": "止损", "vol_shrink": "放量滞涨",
              "expired": "持有到期", "market_exit": "逃顶清仓", "quick_fail": "快速认错"}
 REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
-               "trend_break": "收盘跌破 MA20",
                "vol_shrink": "成交量≥2×5日均量且收阴",
                "expired": "持有满 10 个交易日",
                "market_exit": "大盘触发 Z0 空仓信号, 全线清仓",
@@ -108,18 +107,12 @@ def main():
                 risks = []
                 if code in last_row.index:
                     cl = float(last_row.at[code, "close"])
-                    m20 = last_row.at[code, "ma20"]
-                    # cl/entry_qfq 由浮盈亏反推 (cost 含佣金+滑点系数≈1.0011)
+                    # cl/entry 由浮盈亏反推 (cost 含佣金+滑点系数≈1.0011)
                     ratio = (1 + float(h["pnl_pct"])) * 1.0011
                     if ratio > 0:
                         drop = 1 - 0.92 / ratio          # 再跌多少触发 -8% 硬止损
                         if 0 <= drop <= 0.02:
                             risks.append(f"再跌 {drop:.1%} 触发硬止损(-8%)")
-                    if pd.notna(m20) and m20 > 0:
-                        gap = cl / m20 - 1               # 距 MA20 破位
-                        if 0 <= gap <= 0.02:
-                            tag = "跌破MA20即触发趋势破位" if h["hold_days"] >= 3 else "跌破MA20且持有满3日后触发趋势破位"
-                            risks.append(f"收盘距MA20仅 {gap:.1%}, {tag}")
                 if h["hold_days"] == 9:
                     risks.append("下个交易日满 10 日, 强制持有到期退出")
                 elif h["hold_days"] == 8:
@@ -230,16 +223,16 @@ STRAT_DOC = """
 </tbody>
 </table>
 <p>除状态切换外，同状态内仓位阶梯回落：重仓破 10 日线降半仓、破 20 日线降轻仓。回测全期该状态机处于「逃顶清仓」（Z0）共 297 个交易日（占比约 41%），其中近一年 93 天（38%），是回撤控制的主要来源。仓位控制以「约束新开仓」实现：状态降档后存量持仓随止损/到期自然回落（不做强制减仓，仅 Z0 强制清仓）。</p>
-<p><b>锚定指数 A/B（引擎修复后重测）</b>：仓位记账修复后，锚定指数对照在真实口径下重跑——<b>中证1000锚定全面占优</b>：全期 +44.4% vs 上证 +21.2%，最大回撤 -38.9% vs -49.1%，夏普 0.60 vs 0.38，分年 2024 +3.8% vs -30.6%、2025 +11.9% vs +21.7%、2026 +35.9% vs +58.7%。原因：本策略持仓为小盘动量股，中证1000 与其相关性远高于上证，2024 年初微盘踩踏中中证1000 状态机更早触发 Z0 空仓、真实躲过踩踏（修复前旧口径的 A/B 结论「维持上证」建立在失效的仓位记账上，已被推翻）。<b>当前版本仍锚定上证，换锚待决策</b>——若切换，预期收益/回撤/夏普全面改善，2026 年兑现略慢。</p>
+<p><b>锚定指数 A/B（移除趋势破位后重测）</b>：<b>中证1000锚定全面占优</b>——全期 +70.0% vs 上证 +32.2%，最大回撤 -37.3% vs -47.7%，夏普 0.79 vs 0.49，分年 2024 +3.2% vs -30.5%、2025 +36.6% vs +30.1%、2026 +32.4% vs +64.2%。原因：本策略持仓为小盘动量股，中证1000 与其相关性远高于上证，2024 年初微盘踩踏中中证1000 状态机更早触发 Z0 空仓、真实躲过踩踏。<b>当前版本仍锚定上证，换锚待决策</b>——若切换，收益/回撤/夏普全面改善，代价是 2026 年这类指数大年收益兑现变慢。</p>
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
 <li><b>逃顶清仓</b>：大盘进入 Z0 空仓状态，全部持仓无条件挂卖（最高优先级）；</li>
 <li><b>止损</b>：收盘价 ≤ 买入价 × 0.92（-8%硬止损）；</li>
 <li><b>持有到期</b>：持有满 10 个交易日强制退出；</li>
-<li><b>趋势破位</b>：持有 ≥ 3 日后，收盘跌破 MA20；</li>
 <li><b>放量滞涨</b>：持有 ≥ 2 日后，成交量 ≥ 2 × 前一日5日均量且当日收阴（主力出货嫌疑）。</li>
 </ul>
+<p><b>已移除的规则 · 趋势破位（收盘跌破 MA20）</b>：A/B 复核证实其为纯负贡献——74 笔交易合计约 -17.7 万（平均盈利 +3.6% / 平均亏损 -5.4%），胜率仅 16%，本质是在止损和到期之外把浮盈中的强势股提前砍掉、系统性切断右尾收益。删除后全期收益 +22.5% → +32.2%，夏普 0.39 → 0.49，最大回撤基本不变，故移除。</p>
 
 <h3>五、交易执行与成本假设</h3>
 <ul>
@@ -424,7 +417,8 @@ function drawEquity(){
   const sl = slice();
   const series = [
     {name:'策略净值',type:'line',data:sl.equity,showSymbol:false,lineStyle:{width:1.6,color:'#185FA5'},areaStyle:{color:'rgba(24,95,165,0.06)'}},
-    {name:'沪深300(等基准化)',type:'line',data:sl.bench,showSymbol:false,lineStyle:{width:1.2,color:'#B4B2A9',type:'dashed'}}
+    {name:'沪深300(等基准化)',type:'line',data:sl.bench,showSymbol:false,lineStyle:{width:1.2,color:'#B4B2A9',type:'dashed'}},
+    {name:'中证1000(等基准化)',type:'line',data:sl.bench1000,showSymbol:false,lineStyle:{width:1.2,color:'#B07A2A',type:'dashed'}}
   ];
   eqChart.setOption({
     animation:false,
@@ -517,7 +511,7 @@ function renderAll(){
 document.getElementById('sub').textContent =
   `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (近一年) · 初始资金 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('foot').innerHTML =
-  `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 趋势破位(收盘破MA20) / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
+  `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
    仓位控制: 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
    策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""信号层: 动量轮动策略 + 共享退出标志 + 大盘仓位状态机。全部基于 T 日收盘信息, T+1 执行。
+"""信号层: 动量轮动策略 + 共享退出标志。全部基于 T 日收盘信息, T+1 执行。
 
 价格口径: 信号指标全部基于【后复权 hfq】序列 (历史值永久冻结, 可复现;
 与 qfq 的区间收益一致, 但 qfq 随最新价整体缩放会破坏可复现性, 已弃用)。
@@ -7,16 +7,11 @@
 
 策略C momentum     动量轮动: 20日收益率横截面Top 5%, 多头排列
 
-大盘仓位状态机 (买卖点, 锚定上证指数):
-  Z0 空仓0%: 5MA<10MA且5MA<20MA (逃顶); 或 5MA<20MA且当日跌幅<-1%
-  Z3 重仓100%: 收盘>5MA>10MA>20MA 均线多头排列
-  Z2 半仓50%: 收盘站上20日线
-  Z1 轻仓30%: 5MA/10MA同时拐头向上 (抄底/回补); 破位减仓阶梯回落
-
 退出标志(T收盘判定, T+1开盘执行):
-  break_c: 收盘 < MA20   (动量策略趋势破位)
   shrink : 放量滞涨 vol>=2*vol_ma5[-1] 且 收阴
-引擎侧另有: 止损-8%、持有满10日、逃顶清仓(Z0)。
+引擎侧另有: 止损-8%、持有满10日。
+注: 大盘仓位状态机与趋势破位(破MA20)规则已于 2026-09-07 移除
+(A/B 证实趋势破位为纯负贡献; 状态机在真实记账口径下亦为负贡献)。
 """
 import glob, os
 import numpy as np
@@ -96,7 +91,8 @@ def market_regime(index_file=None, out_file=None):
     """买卖点仓位状态机 -> 每日目标仓位比例 (默认锚定上证指数)
     参考: 用户腾讯文档《买卖点》(docs.qq.com/doc/DWGdJeWR0amRjc3ZC)
     Z0 空仓 / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%
-    index_file/out_file: 可替换锚定指数 (如中证1000 csi1000_daily.parquet)
+    注: 2026-09-07 A/B 复核 —— 状态机(含 Z0 逃顶与阶梯预算)是策略核心风控,
+    完全移除后全期收益由 +32% 恶化至 -78%, 必须保留。
     """
     index_file = index_file or f"{BASE}/data/meta/index_daily.parquet"
     out_file = out_file or f"{BASE}/data/meta/market_regime.parquet"
@@ -155,10 +151,9 @@ def signal_momentum(df):
 
 
 def exit_flags(df):
-    """趋势破位 / 放量滞涨标志"""
-    break_c = df["close"] < df["ma20"]
+    """放量滞涨标志 (趋势破位规则已于 2026-09-07 移除: A/B 证实纯负贡献)"""
     shrink = (df["volume"] >= 2 * df["prev_vol_ma5"]) & (df["ret"] < 0) & (df["close"] < df["open"])
-    return break_c, shrink
+    return shrink
 
 
 def run_scan():
@@ -181,7 +176,7 @@ def run_scan():
 
     market_regime()
     sig_c, score_c = signal_momentum(df)
-    break_c, shrink = exit_flags(df)
+    shrink = exit_flags(df)
 
     names = basic.set_index("secid")["name"]
 
@@ -206,7 +201,6 @@ def run_scan():
     # 退出标志 -> 宽表
     idx = df.index
     flags = pd.DataFrame({
-        "break_c": break_c.fillna(False).values,
         "shrink": shrink.fillna(False).values,
         "close": df["close"].values,
         "raw_close": df["raw_close"].values,
