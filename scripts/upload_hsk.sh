@@ -18,7 +18,7 @@ fi
 KEY_ARGS=()
 [ -n "$HSK_API_KEY" ] && KEY_ARGS=(--api-key "$HSK_API_KEY")
 
-OUT=$($HSK host "$REPORT" --resource-id "$RESOURCE_ID" "${KEY_ARGS[@]}" --format json 2>/dev/null)
+OUT=$($HSK host "$REPORT" --resource-id "$RESOURCE_ID" "${KEY_ARGS[@]}" --format json 2>&1)
 
 # hsk-cli 0.4.6 更新成功输出: update_result: {"code":0,"data":{},"message":"ok"}
 if echo "$OUT" | grep -q '"message":"ok"'; then
