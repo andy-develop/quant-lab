@@ -122,6 +122,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0):
                 "shares": pos["shares"], "pnl_pct": pnl_cny / pos["cost"],
                 "pnl_cny": pnl_cny, "reason": reason,
                 "hold_days": pos["hold_days"],
+                "buy_rank": pos.get("buy_rank", 0),
             })
             del pending_sells[code]
 
@@ -139,7 +140,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0):
         held = set(positions) | set(pending_sells)
         free = MAX_POS - len(positions)
         n_try = 0
-        for sc, strat, code in cands:
+        for rank_c, (sc, strat, code) in enumerate(cands, 1):
             if free <= 0 or n_try >= MAX_BUY_PER_DAY:
                 break
             if invested >= max_invest - 1000:   # 预算用尽 (1000元容差)
@@ -166,6 +167,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0):
                 "name": names.get(code, code), "strategy": strat,
                 "entry_date": day, "entry_qfq": px, "entry_px_raw": ro.at[day, code],
                 "shares": shares, "cost": cost + fee, "hold_days": 0,
+                "buy_rank": rank_c, "buy_score": sc,
             }
             held.add(code)
             free -= 1
