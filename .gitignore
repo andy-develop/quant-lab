@@ -7,6 +7,7 @@ data/meta/trades.parquet
 data/meta/holdings.parquet
 data/meta/pending_sells.parquet
 data/meta/bs_progress_*.json
+data/meta/hfq_progress_*.json
 data/meta/backfill_progress.json
 data/meta/upload_hsk.log
 

@@ -22,18 +22,6 @@ REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
 WINDOW_DAYS = 244        # 报告窗口: 近一年(交易日)
 
 
-def metrics_from_equity(eq, bench):
-    ret = eq / eq.iloc[0]
-    n = len(eq)
-    daily = eq.pct_change().dropna()
-    total = float(eq.iloc[-1] / eq.iloc[0] - 1)
-    ann = float((1 + total) ** (244 / max(n, 1)) - 1) if n > 1 else 0.0
-    sharpe = float(daily.mean() / daily.std() * np.sqrt(244)) if daily.std() > 0 else 0.0
-    dd = (eq / eq.cummax() - 1).min()
-    b_total = float(bench.iloc[-1] / bench.iloc[0] - 1) if len(bench) else 0.0
-    return {"total": total, "ann": ann, "sharpe": sharpe, "maxdd": float(dd), "n": n, "bench": b_total}
-
-
 def main():
     eq = pd.read_csv(f"{META}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
     bench = pd.read_parquet(f"{META}/bench_daily.parquet").set_index("date")["close"]
@@ -101,7 +89,7 @@ def main():
 
     # ---- 卖出风险预警: 未挂单但距离触发条件很近的持仓 ----
     risk_list = []
-    ps_codes_all = set(ps["code"]) if os.path.exists(ps_file) else set()
+    ps_codes_all = set(ps["code"]) if (os.path.exists(ps_file) and "code" in ps.columns) else set()
     pending_codes = {c for c in ps_codes_all if c in hold_last.index}
     try:
         codes = [c for c in hold_last.index if c not in pending_codes]
@@ -227,7 +215,7 @@ STRAT_DOC = """
 <li>流动性过滤：20 日日均成交额 ≥ 3000 万元；</li>
 <li>评分：20 日收益率，策略内按日转排名分位（0–1），同日多信号按评分从高到低依次买入。</li>
 </ul>
-<p><b>股票池过滤</b>：剔除 ST、*ST、退市整理期个股；北交所因数据源不支持天然不含。全池基于 baostock 日线（含退市股，规避幸存者偏差），前复权价计算信号与收益、不复权价展示成交明细。</p>
+<p><b>股票池过滤</b>：剔除 ST、*ST、退市整理期个股；北交所因数据源不支持天然不含。全池基于 baostock 日线（含退市股，规避幸存者偏差）。价格口径：信号与收益使用<b>后复权序列</b>（历史值永久冻结，任意日期重跑结果可复现），成交明细展示不复权真实价；流动性过滤使用<b>真实成交额</b>（非前复权近似）。</p>
 
 <h3>三、大盘仓位状态机（「买卖点」，锚定上证指数）</h3>
 <p>总仓位不靠主观判断，由上证指数均线状态决定，参考用户腾讯文档《买卖点》实现为四态状态机。当日目标仓位由<b>前一交易日收盘状态</b>决定（防未来函数）：</p>
@@ -240,8 +228,8 @@ STRAT_DOC = """
 <tr><td><b>Z3 重仓</b></td><td>100%</td><td>收盘 &gt; 5MA &gt; 10MA &gt; 20MA（均线多头排列）</td><td>多头行情全仓参与</td></tr>
 </tbody>
 </table>
-<p>除状态切换外，同状态内仓位阶梯回落：重仓破 10 日线降半仓、破 20 日线降轻仓。近一年该状态机触发「逃顶清仓」88 次（Z0 空仓天数占比约 31%），是回撤控制的主要来源。</p>
-<p><b>锚定指数 A/B 结论</b>：曾将状态机锚定切换为中证1000（与持仓小盘动量股相关性更高）做对照实验——全期收益 +30.1% vs 上证锚定 +28.9% 略优，但最大回撤恶化至 -37.8%（vs -31.1%），且分年不稳（2025 年由 +4.6 万转为 -10.8 万）。不满足「分年不劣于基线」的上线纪律，故维持<b>上证指数锚定</b>。核心指标对比表中的「中证1000长持」仅作为策略收益的对照基准（中证1000 与本策略持仓风格更接近，是比沪深300 更严格的对照组）。</p>
+<p>除状态切换外，同状态内仓位阶梯回落：重仓破 10 日线降半仓、破 20 日线降轻仓。回测全期该状态机处于「逃顶清仓」（Z0）共 297 个交易日（占比约 41%），其中近一年 93 天（38%），是回撤控制的主要来源。仓位控制以「约束新开仓」实现：状态降档后存量持仓随止损/到期自然回落（不做强制减仓，仅 Z0 强制清仓）。</p>
+<p><b>锚定指数 A/B（引擎修复后重测）</b>：仓位记账修复后，锚定指数对照在真实口径下重跑——<b>中证1000锚定全面占优</b>：全期 +44.4% vs 上证 +21.2%，最大回撤 -38.9% vs -49.1%，夏普 0.60 vs 0.38，分年 2024 +3.8% vs -30.6%、2025 +11.9% vs +21.7%、2026 +35.9% vs +58.7%。原因：本策略持仓为小盘动量股，中证1000 与其相关性远高于上证，2024 年初微盘踩踏中中证1000 状态机更早触发 Z0 空仓、真实躲过踩踏（修复前旧口径的 A/B 结论「维持上证」建立在失效的仓位记账上，已被推翻）。<b>当前版本仍锚定上证，换锚待决策</b>——若切换，预期收益/回撤/夏普全面改善，2026 年兑现略慢。</p>
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
@@ -257,14 +245,15 @@ STRAT_DOC = """
 <li><b>执行时点</b>：T 日收盘出信号（含退出判定），T+1 日开盘价成交，先卖后买；</li>
 <li><b>A股规则内建</b>：T+1（买入当日不可卖）；开盘涨停（开盘价≥涨停价）放弃买入；开盘跌停顺延至下一开盘卖出；停牌顺延；</li>
 <li><b>整手交易</b>：买入股数为 100 股整数倍、最低 1 手，单只预算 ≈ 总资金/10，且不超过状态机目标仓位对应预算；</li>
-<li><b>成本</b>：佣金万1（双边）+ 印花税 0.05%（卖出）+ 滑点 0.1%（单边）；</li>
-<li>涨跌幅限制按板块区分：主板 10%，创业板/科创板 20%。</li>
+<li><b>成本</b>：佣金万1（双边，单笔最低 5 元）+ 印花税 0.05%（卖出）+ 滑点 0.1%（单边）；</li>
+<li>涨跌幅限制按板块区分：主板 10%，创业板/科创板 20%；停牌复牌首日跳空以复牌开盘价对比停牌前收盘判定；</li>
 </ul>
 
 <h3>六、数据源与已知局限</h3>
 <ul>
 <li>日线数据：baostock（含退市股）+ 腾讯行情增量更新；指数：上证指数日线；</li>
-<li>回测区间自 2023-09 起，网页展示窗口默认近一年；</li>
+<li>回测区间自 2023-09 起（信号所需的 120 日动量前置数据自 2023-01 回补，<b>窗口首日信号即有效</b>，不存在前期"假空仓"）；网页展示窗口默认近一年；</li>
+<li><b>可复现性</b>：信号基于后复权序列，历史值不随新除权事件改变；</li>
 <li><b>局限</b>：未建模盘中撮合排队（以开盘价全额成交近似）；滑点为固定比例，小市值极端行情可能更大；未含融资利息（纯现货）；信号日若开盘涨停则机会直接放弃，实盘可能以更高成本追入；历史回测表现不代表未来收益。</li>
 </ul>
 <p style="color:#88867E">仅供研究学习，不构成投资建议。</p>
@@ -423,7 +412,7 @@ function kpis(){
     `<tr><td>区间收益</td><td class="${cls(total)}"><b>${fmtPct(total)}</b></td><td class="${cls(bTotal)}">${fmtPct(bTotal)}</td><td class="${cls(cTotal)}">${fmtPct(cTotal)}</td></tr>`+
     `<tr><td>最大回撤</td><td class="down"><b>${fmtPct(mdd)}</b></td><td class="down">${fmtPct(bMdd)}</td><td class="down">${fmtPct(cMdd)}</td></tr>`+
     `<tr><td>夏普比率</td><td class="${sharpe>=1?'up':''}"><b>${sharpe.toFixed(2)}</b></td><td>${bSharpe.toFixed(2)}</td><td>${cSharpe.toFixed(2)}</td></tr>`+
-    `<tr><td>胜率 <span class="note">${tr.length}笔 · 盈亏比${pf.toFixed(2)}</span></td><td class="${win>=0.5?'up':'down'}"><b>${(win*100).toFixed(1)}%</b></td><td class="note">—</td><td class="note">—</td></tr>`+
+    `<tr><td>胜率 <span class="note">${tr.length}笔 · 盈利因子${pf.toFixed(2)}<br>(Σ盈利/Σ亏损, 非平均盈亏比)</span></td><td class="${win>=0.5?'up':'down'}"><b>${(win*100).toFixed(1)}%</b></td><td class="note">—</td><td class="note">—</td></tr>`+
     `</tbody>`;
   return tr;
 }

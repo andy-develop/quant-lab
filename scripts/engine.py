@@ -9,7 +9,9 @@ import os
   - 仓位控制: 每日最多买入3只; 总仓位锚定上证指数买卖点状态机
     (Z0空仓0%且清仓 / Z1轻仓30% / Z2半仓50% / Z3重仓100%), 见 signals.market_regime
   - T+1: 买入次日不可卖(引擎天然满足: 卖出信号在收盘判定, 最早次日开盘执行)
-会计口径: 前复权价格(自动含分红除权), 交易流水展示不复权价。
+会计口径: 后复权价格(hfq, 连续且历史值永久冻结)做信号/涨跌停判定/估值/现金流;
+交易流水展示不复权价。hfq 与 qfq 的区间收益率完全一致(复权因子在比值中约掉)。
+预算控制: 持仓市值实时按最近收盘价重算(不维护增量记账, 避免已实现盈亏泄漏)。
 """
 import numpy as np
 import pandas as pd
@@ -24,11 +26,20 @@ MAX_HOLD = 10            # 最长持有交易日
 MIN_HOLD_BREAK = 3       # 趋势破位最小持有
 MIN_HOLD_SHRINK = 2      # 放量滞涨最小持有
 COMM, STAMP, SLIP = 0.0001, 0.0005, 0.001
-EXIT_PRIORITY = ["stop_loss", "trend_break", "vol_shrink", "expired"]
+MIN_FEE = 5.0            # 单笔佣金最低 5 元
 
 
 def limit_pct(code):
-    return 0.20 if code[:2] in ("30", "68") else 0.10
+    c = code.split(".", 1)[-1]            # "1.300750"/"sz.300750" -> "300750"
+    return 0.20 if c[:2] in ("30", "68") else 0.10
+
+
+def buy_fee(amount):
+    return max(amount * COMM, MIN_FEE)
+
+
+def sell_fee(amount):
+    return max(amount * COMM, MIN_FEE) + amount * STAMP   # 印花税无下限
 
 
 def load_wide():
@@ -60,11 +71,12 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
     cal = cal[cal >= pd.Timestamp(start)] if start else cal
     start = start or str(cal[0].date())
 
-    qo, qc = piv["open"], piv["close"]
-    ro, rc = piv["raw_open"], piv["raw_close"]
-    # 涨跌停判定: 用前复权比值 (开盘/昨收 - 1 对比涨跌幅), 容差0.002 吸收除权与精度差
-    # (不能拿前复权价对比不复权涨停价——量纲不一致会让一字板全部漏判)
-    prev_qc = qc.shift(1)
+    qo, qc = piv["open"], piv["close"]        # hfq 口径 (连续, 涨跌停判定/成交/估值)
+    ro, rc = piv["raw_open"], piv["raw_close"]  # 不复权 (展示价)
+    # 涨跌停判定: 用后复权比值 (开盘/昨收 - 1 对比涨跌幅), 容差0.002 吸收精度差
+    # (hfq 同日线性缩放, 比值即真实涨跌幅, 且跨除权日连续;
+    #  ffill 修复停牌日 NaN -> 复牌首日跳空可被正确识别)
+    prev_qc = qc.ffill().shift(1)
     pct = pd.Series({c: limit_pct(c) for c in qc.columns})
     pct_frame = pd.DataFrame({c: pct[c] for c in qc.columns}, index=qc.index)
     open_ret = qo / prev_qc - 1
@@ -81,7 +93,6 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
     regime = regime.set_index("date")["target_ratio"].shift(1)
 
     cash = START_CAP
-    invested = 0.0        # 持仓市值 (随卖出/买入即时维护, 用于预算控制)
     positions = {}   # code -> dict
     trades, holdings_daily = [], []
     equity = []
@@ -111,9 +122,8 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
                 continue                      # 开盘跌停卖不出, 顺延
             pos = positions.pop(code)
             proceeds = pos["shares"] * px * (1 - SLIP)
-            fee = proceeds * (COMM + STAMP)
+            fee = sell_fee(proceeds)
             cash += proceeds - fee
-            invested -= proceeds - fee
             exit_raw = ro.at[day, code]
             pnl_cny = proceeds - fee - pos["cost"]
             trades.append({
@@ -128,8 +138,13 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
             del pending_sells[code]
 
         # 买入: 【前一交易日收盘】的信号 -> 今日开盘执行 (防未来函数)
-        # 仓位控制: 每日最多 MAX_BUY_PER_DAY 只; 总市值不得超过 max_invest (状态机目标仓位)
+        # 仓位控制: 每日最多 MAX_BUY_PER_DAY 只; 持仓市值不得超过 max_invest (状态机目标仓位)
+        # 持仓市值 mv 实时按最近收盘价重算 (缺陷修复: 不再增量记账, 杜绝已实现盈亏泄漏)
         prev_day = cal[cal_pos[day] - 1] if cal_pos[day] > 0 else None
+        mv = 0.0
+        for pos_ in positions.values():
+            cl_ = pos_.get("last_close", np.nan)
+            mv += pos_["shares"] * (cl_ if not np.isnan(cl_) else pos_["entry_adj"])
         cands = []
         if prev_day is not None and ratio >= max(min_buy_ratio, 0.001):
             for strat, sw in sig_w.items():
@@ -139,12 +154,12 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
                         cands.append((float(sc), strat, code))
         cands.sort(reverse=True)
         held = set(positions) | set(pending_sells)
-        free = MAX_POS - len(positions)
+        free = MAX_POS - len(positions)     # 剩余空位 (每买一只减 1, 兼作现金分摊分母)
         n_try = 0
         for rank_c, (sc, strat, code) in enumerate(cands, 1):
             if free <= 0 or n_try >= MAX_BUY_PER_DAY:
                 break
-            if invested >= max_invest - 1000:   # 预算用尽 (1000元容差)
+            if mv >= max_invest - 1000:         # 预算用尽 (1000元容差)
                 break
             if code in held:
                 continue
@@ -154,19 +169,19 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
             if code in no_buy.columns and bool(no_buy.at[day, code]):
                 continue                      # 开盘涨停买不进
             slot = min(equity[-1][1] / MAX_POS if equity else START_CAP / MAX_POS,
-                       cash / max(free - n_try, 1),
-                       max_invest - invested)  # 不超目标仓位预算
+                       cash / max(free, 1),
+                       max_invest - mv)       # 不超目标仓位预算
             shares = int(slot / (px * 100)) * 100
             if shares < 100:
                 continue
             cost = shares * px * (1 + SLIP)
-            fee = cost * COMM
+            fee = buy_fee(cost)
             cash -= cost + fee
-            invested += cost + fee
+            mv += cost + fee
             n_try += 1
             positions[code] = {
                 "name": names.get(code, code), "strategy": strat,
-                "entry_date": day, "entry_qfq": px, "entry_px_raw": ro.at[day, code],
+                "entry_date": day, "entry_adj": px, "entry_px_raw": ro.at[day, code],
                 "shares": shares, "cost": cost + fee, "hold_days": 0,
                 "buy_rank": rank_c, "buy_score": sc,
             }
@@ -178,7 +193,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
         snap = []
         for code, pos in positions.items():
             cl = qc.at[day, code] if code in qc.columns else np.nan
-            val = pos["shares"] * (cl if not np.isnan(cl) else pos["entry_qfq"])
+            val = pos["shares"] * (cl if not np.isnan(cl) else pos["entry_adj"])
             pos["hold_days"] += 1
             pos["last_close"] = cl
             total += val
@@ -193,7 +208,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
             reason = None
             if quick_fail and pos["hold_days"] == 1 and pnl_pct <= quick_fail:
                 reason = "quick_fail"      # 快速认错: 首日收盘浮亏超阈值, 次日开盘退出
-            elif not np.isnan(cl) and cl <= pos["entry_qfq"] * STOP_PCT:
+            elif not np.isnan(cl) and cl <= pos["entry_adj"] * STOP_PCT:
                 reason = "stop_loss"
             elif pos["hold_days"] >= MAX_HOLD:
                 reason = "expired"
@@ -213,7 +228,7 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
         if de_risk_pt > 0 and ratio > 0:
             def _val(p):
                 cl = p["last_close"]
-                return p["shares"] * (cl if not np.isnan(cl) else p["entry_qfq"])
+                return p["shares"] * (cl if not np.isnan(cl) else p["entry_adj"])
             mv = total - cash
             budget = total * ratio
             if mv > budget * (1 + de_risk_pt):
@@ -236,7 +251,8 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0, 
     hd = pd.DataFrame(holdings_daily)
     eq.to_csv(f"{BASE}/data/meta/equity.csv")
     # 待卖清单: 最后交易日收盘时已挂卖出、将于下一开盘执行的持仓
-    pd.DataFrame([{"code": c, "reason": r} for c, r in pending_sells.items()]) \
+    pd.DataFrame([{"code": c, "reason": r} for c, r in pending_sells.items()],
+                 columns=["code", "reason"]) \
         .to_parquet(f"{BASE}/data/meta/pending_sells.parquet", index=False)
     if len(tr):
         tr.to_parquet(f"{BASE}/data/meta/trades.parquet", index=False)

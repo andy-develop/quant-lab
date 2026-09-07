@@ -53,7 +53,7 @@ def trim_shards(cut):
     """裁剪主分片与 fixup 到滚动窗口 (TRIM_KLINE=1 时才调用)"""
     n = 0
     for f in sorted(glob.glob(f"{KDIR}/qfq_*.parquet") + glob.glob(f"{KDIR}/raw_*.parquet")
-                    + glob.glob(f"{KDIR}/fixup/*.parquet")):
+                    + glob.glob(f"{KDIR}/hfq_*.parquet") + glob.glob(f"{KDIR}/fixup/*.parquet")):
         df = pd.read_parquet(f)
         df["date"] = pd.to_datetime(df["date"])
         kept = df[df["date"] >= cut]

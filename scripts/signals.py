@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """信号层: 动量轮动策略 + 共享退出标志 + 大盘仓位状态机。全部基于 T 日收盘信息, T+1 执行。
 
+价格口径: 信号指标全部基于【后复权 hfq】序列 (历史值永久冻结, 可复现;
+与 qfq 的区间收益一致, 但 qfq 随最新价整体缩放会破坏可复现性, 已弃用)。
+成交量/成交额用不复权真实值。
+
 策略C momentum     动量轮动: 20日收益率横截面Top 5%, 多头排列
 
 大盘仓位状态机 (买卖点, 锚定上证指数):
@@ -23,7 +27,7 @@ START = "2023-09-01"
 
 
 def load_klines(kind):
-    """kind: raw / qfq -> 分片 + 增量 + 除权修复, 合并为长表"""
+    """kind: raw / hfq -> 分片 + 增量 + 除权修复, 合并为长表"""
     files = sorted(glob.glob(f"{BASE}/data/kline/{kind}_*.parquet"))
     files += sorted(glob.glob(f"{BASE}/data/kline/incremental/{kind}_*.parquet"))
     if not files:
@@ -48,16 +52,20 @@ def gshift(s, n):
     return s.groupby(level=0, sort=False).transform(lambda x: x.shift(n))
 
 
-def build_indicators(qfq, raw):
-    """在 (code,date) MultiIndex 上计算全部指标"""
-    q = qfq.set_index(["code", "date"]).sort_index()
+def build_indicators(hfq, raw):
+    """在 (code,date) MultiIndex 上计算全部指标。
+    hfq: 后复权 OHLC —— 动量/均线等比值类指标, 历史值永久冻结、可复现;
+         与 qfq 计算的区间收益完全一致(复权因子在比值中约掉)。
+    raw: 不复权 —— 真实成交量/成交额/展示价。
+    """
+    q = hfq.set_index(["code", "date"]).sort_index()
     r = raw.set_index(["code", "date"]).sort_index()
     df = pd.DataFrame(index=q.index)
     df["close"] = q["close"]
     df["open"] = q["open"]
     df["high"] = q["high"]
     df["low"] = q["low"]
-    df["volume"] = r["volume"]          # 量能从 raw 取 (qfq 分片可能无 volume, 且量本就不复权)
+    df["volume"] = r["volume"]          # 量能从 raw 取 (量本就不复权)
     df["raw_close"] = r["close"]
 
     # 均线与前值
@@ -71,8 +79,12 @@ def build_indicators(qfq, raw):
     df["ret20"] = df["close"] / gshift(df["close"], 20) - 1
     df["ret120"] = df["close"] / gshift(df["close"], 120) - 1
     df["ma60_rising"] = df["ma60"] > gshift(df["ma60"], 20)
-    # 流动性: 近似成交额 = 收盘*量(手)*100
-    df["amt"] = df["close"] * df["volume"] * 100
+    # 流动性: 优先用真实成交额(baostock raw 分片/腾讯快照均含 amount);
+    # 缺失时退化为 收盘*量(手)*100 近似
+    if "amount" in r.columns:
+        df["amt"] = r["amount"].fillna(df["close"] * df["volume"] * 100)
+    else:
+        df["amt"] = df["close"] * df["volume"] * 100
     df["amt20"] = groll(df["amt"], 20, "mean")
     r_open = r["open"].reindex(df.index)
     df["raw_open"] = r_open
@@ -151,17 +163,20 @@ def exit_flags(df):
 
 def run_scan():
     print("加载K线分片...", flush=True)
-    qfq = load_klines("qfq")
+    hfq = load_klines("hfq")
     raw = load_klines("raw")
     basic = pd.read_parquet(f"{BASE}/data/meta/stock_basic.parquet")
     # 过滤: ST/退市整理/低价股/北交所(baostock无北交, 天然不含)
     basic = basic[~basic["name"].str.contains("ST|退", na=False)]
     keep = set(basic["secid"])
-    qfq = qfq[qfq["code"].isin(keep)]
+    hfq = hfq[hfq["code"].isin(keep)]
     raw = raw[raw["code"].isin(keep)]
-    print(f"K线加载: qfq {len(qfq):,} 行 / raw {len(raw):,} 行 / 有效股票 {qfq['code'].nunique()}", flush=True)
+    print(f"K线加载: hfq {len(hfq):,} 行 / raw {len(raw):,} 行 / 有效股票 {hfq['code'].nunique()}", flush=True)
 
-    df = build_indicators(qfq, raw)
+    df = build_indicators(hfq, raw)
+    # 回测窗口: 2023-09-01 起 (指标已在 hfq 全历史上计算, 2023-01 起的前置数据
+    # 保证 ret120 在窗口首日即可用 —— 消除"前120日空仓死区"假象, 缺陷③修复)
+    df = df[df.index.get_level_values(1) >= pd.Timestamp(START)]
     print("指标计算完成", flush=True)
 
     market_regime()

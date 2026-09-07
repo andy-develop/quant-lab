@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """每日收盘后增量更新:
-1. 全市场快照(腾讯批量, ~93请求) -> 当日K线追加(不复权 + qfq按比例折算)
-2. 除权检测: 快照昨收 != 库内最后收盘 -> 整段重拉该股(修复分片)
+1. 全市场快照(腾讯批量, ~93请求) -> 当日K线追加(不复权raw含真实成交额 + hfq按冻结因子折算)
+2. 除权检测: 快照昨收 != 库内最后收盘 -> 整段重拉该股(raw直接修复, hfq由新qfq派生)
 3. 涨停池/炸板池(近10个交易日缺失的补齐)
 4. 输出汇总 data/pool/summary.csv
 用法: python daily_update.py
@@ -67,12 +67,13 @@ def snapshot_day(s, secids, day_ts):
                 o, c, h, l = float(parts[5]), float(parts[3]), float(parts[33]), float(parts[34])
                 v = float(parts[6]) if parts[6] else 0.0
                 prev = float(parts[4])
+                amt = float(parts[37]) * 1e4 if parts[37] else 0.0   # 成交额(万元) -> 元
             except ValueError:
                 continue
             if c <= 0 or o <= 0:
                 continue
             rows.append({"code": sym_map[sym_full], "date": day_ts, "open": o, "close": c,
-                         "high": h, "low": l, "volume": v, "prev_close": prev})
+                         "high": h, "low": l, "volume": v, "amount": amt, "prev_close": prev})
         time.sleep(0.1)
     return pd.DataFrame(rows)
 
@@ -134,51 +135,85 @@ def update_kline():
     snap["is_div"] = (snap["stored_prev"].notna()) & ((snap["prev_close"] / snap["stored_prev"] - 1).abs() > 0.005)
     div_codes = snap.loc[snap["is_div"], "code"].tolist()
     print(f"快照 {len(snap)} 只, 检测到除权 {len(div_codes)} 只", flush=True)
-    # qfq 折算比例: 库内最后一条 qfq_close / raw_close (未除权股票比例不变)
+    # hfq 折算因子: 库内最后一条 hfq_close / raw_close (后复权因子, 非除权日恒定)
+    # hfq = raw × 因子 —— 与 qfq 不同, hfq 历史值永久冻结, 信号可复现 (缺陷④修复)
     ratio = {}
     last_rows = store.groupby("code").tail(1).set_index("code")[["close"]]
-    raws_all = sorted(glob.glob(f"{KDIR}/qfq_*.parquet")) + sorted(glob.glob(f"{KDIR}/incremental/qfq_*.parquet"))
-    qfq_last = pd.concat([pd.read_parquet(f) for f in raws_all], ignore_index=True)
-    qfq_last["date"] = pd.to_datetime(qfq_last["date"])
-    qfq_last = qfq_last.groupby("code").tail(1).set_index("code")[["close"]].rename(columns={"close": "qfq_close"})
-    rr = last_rows.join(qfq_last, how="inner")
-    ratio = (rr["qfq_close"] / rr["close"]).replace([np.inf, -np.inf], np.nan).dropna().to_dict()
-    # 除权股整段重拉(修复)
+    hfq_all = sorted(glob.glob(f"{KDIR}/hfq_*.parquet")) + sorted(glob.glob(f"{KDIR}/incremental/hfq_*.parquet"))
+    hfq_last = pd.concat([pd.read_parquet(f) for f in hfq_all], ignore_index=True)
+    hfq_last["date"] = pd.to_datetime(hfq_last["date"])
+    hfq_last = hfq_last.groupby("code").tail(1).set_index("code")[["close"]].rename(columns={"close": "hfq_close"})
+    rr = last_rows.join(hfq_last, how="inner")
+    ratio = (rr["hfq_close"] / rr["close"]).replace([np.inf, -np.inf], np.nan).dropna().to_dict()
+    # 除权股整段重拉(修复): raw 网络重拉 + 由新 qfq 派生整段 hfq
     os.makedirs(f"{KDIR}/fixup", exist_ok=True)
     for code in div_codes:
         sym = ("sh" if code.startswith("1.") else "sz") + code.split(".")[1]
         fix = refetch_one(s, code, sym)
         if fix is not None:
             fix[0].to_parquet(f"{KDIR}/fixup/raw_{code.replace('.', '_')}.parquet", index=False)
-            fix[1].to_parquet(f"{KDIR}/fixup/qfq_{code.replace('.', '_')}.parquet", index=False)
+            hfq_fix = derive_hfq_fixup(code, fix[1])
+            if hfq_fix is not None:
+                hfq_fix.to_parquet(f"{KDIR}/fixup/hfq_{code.replace('.', '_')}.parquet", index=False)
         time.sleep(0.2)
     # 除权股当日行取自修复序列; 其余用折算
     snap_ok = snap[~snap["is_div"]].copy()
     snap_ok["adj"] = snap_ok["code"].map(ratio).fillna(1.0)
-    inc_raw = snap_ok[["code", "date", "open", "close", "high", "low", "volume"]]
-    inc_qfq = snap_ok[["code", "date", "open", "close", "high", "low"]].mul(
+    inc_raw = snap_ok[["code", "date", "open", "close", "high", "low", "volume", "amount"]]
+    inc_hfq = snap_ok[["code", "date", "open", "close", "high", "low"]].mul(
         snap_ok["adj"], axis=0)
-    inc_qfq.insert(5, "volume", snap_ok["volume"].values)
     os.makedirs(f"{KDIR}/incremental", exist_ok=True)
     inc_raw.to_parquet(inc_path, index=False)
-    inc_qfq.to_parquet(f"{KDIR}/incremental/qfq_{target_day:%Y%m%d}.parquet", index=False)
+    inc_hfq.to_parquet(f"{KDIR}/incremental/hfq_{target_day:%Y%m%d}.parquet", index=False)
     print(f"K线增量入库: {len(inc_raw)} 只 ({target_day:%Y-%m-%d}), 除权修复 {len(div_codes)} 只", flush=True)
     return target_day
 
 
+def derive_hfq_fixup(code, qfq_fresh):
+    """由整段重拉的新 qfq 派生 hfq: hfq = qfq × K, K = hfq库内最后收盘 / qfq同日收盘。
+    (hfq/qfq 对同一快照为常数 —— 两者都是 raw×复权因子, 因子比值不随日期变)
+    库内无该股 hfq 时返回 None (K 无法锚定)。"""
+    fixs = sorted(glob.glob(f"{KDIR}/hfq_*.parquet") + glob.glob(f"{KDIR}/incremental/hfq_*.parquet")
+                  + glob.glob(f"{KDIR}/fixup/hfq_{code.replace('.', '_')}.parquet"))
+    if not fixs:
+        return None
+    dfs = [pd.read_parquet(f) for f in fixs]
+    hf = pd.concat(dfs, ignore_index=True)
+    hf["date"] = pd.to_datetime(hf["date"])
+    hf = hf[hf["code"] == code].sort_values("date")
+    if hf.empty:
+        return None
+    last_date = hf["date"].iloc[-1]
+    q = qfq_fresh.copy()
+    q["date"] = pd.to_datetime(q["date"])
+    anchor = q[q["date"] == last_date]
+    if anchor.empty or not hf["close"].iloc[-1]:
+        return None
+    k = hf["close"].iloc[-1] / anchor["close"].iloc[0]
+    out = qfq_fresh[["code", "date", "open", "close", "high", "low"]].copy()
+    for c_ in ["open", "close", "high", "low"]:
+        out[c_] = out[c_] * k
+    return out
+
+
 def refetch_one(s, code, sym):
     def get(fq):
-        r = s.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-                  params={"param": f"{sym},day,2023-09-01,2026-12-31,800,{fq}"}, timeout=15)
-        d = r.json()["data"][sym]
-        bars = d.get("qfqday" if fq == "qfq" else "day") or d.get("day")
-        if not bars:
+        # 腾讯单次约800根上限, 分两段拼接 (2023-01 起约950个交易日)
+        out = []
+        for a, b in [("2023-01-01", "2024-12-31"), ("2025-01-01", "2026-12-31")]:
+            r = s.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                      params={"param": f"{sym},day,{a},{b},800,{fq}"}, timeout=15)
+            d = r.json()["data"][sym]
+            bars = d.get("qfqday" if fq == "qfq" else "day") or d.get("day")
+            if bars:
+                out += [bar for bar in bars if isinstance(bar, list) and len(bar) >= 6]
+        if not out:
             return None
-        recs = [b[:6] for b in bars if isinstance(b, list) and len(b) >= 6]
-        df = pd.DataFrame(recs, columns=["date", "open", "close", "high", "low", "volume"])
+        df = pd.DataFrame([x[:6] for x in out], columns=["date", "open", "close", "high", "low", "volume"])
         df["date"] = pd.to_datetime(df["date"])
         for c_ in ["open", "close", "high", "low", "volume"]:
             df[c_] = pd.to_numeric(df[c_], errors="coerce")
+        df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
         df.insert(0, "code", code)
         return df
     raw, qfq = get(""), get("qfq")
