@@ -49,4 +49,4 @@ jobs:
         env:
           HSK_API_KEY: ${{ secrets.HSK_API_KEY }}
           HSK_RESOURCE_ID: ${{ secrets.HSK_RESOURCE_ID }}
-        run: zsh scripts/upload_hsk.sh
+        run: bash scripts/upload_hsk.sh
