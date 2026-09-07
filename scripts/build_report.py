@@ -59,7 +59,7 @@ def main():
     # ---- 待买清单: 最后交易日的信号 ----
     last_sigs = sigs[sigs["date"] == last_day].sort_values("score", ascending=False).reset_index(drop=True)
     last_sigs["rank"] = last_sigs.index + 1          # 当日候选排名 (评分第1名起)
-    pending = last_sigs.head(20).to_dict("records")
+    pending = last_sigs.head(3).to_dict("records")   # 每日最多买 3 只
     for x in pending:
         x["code"] = x["code"][-6:]
         x["strategy_cn"] = STRAT_CN[x["strategy"]]
@@ -136,6 +136,17 @@ def main():
     except Exception as e:
         print(f"[WARN] 卖出风险预警计算失败: {e}", flush=True)
 
+    # ---- 持仓合计 vs 目标仓位 ----
+    hold_list = [
+        {"code": r["code"][-6:], "name": r["name"], "strategy_cn": STRAT_CN[r["strategy"]],
+         "entry_date": str(r["entry_date"].date()), "entry_px": float(r["entry_px"]),
+         "shares": int(r["shares"]), "value": float(r["value"]),
+         "pnl_pct": float(r["pnl_pct"]), "hold_days": int(r["hold_days"])}
+        for _, r in hold[hold["date"] == last_day].sort_values("strategy").iterrows()
+    ]
+    hold_value = sum(x["value"] for x in hold_list)
+    hold_ratio = hold_value / float(eq.iloc[-1]) if float(eq.iloc[-1]) > 0 else 0.0
+
     # ---- JSON 载荷 ----
     payload = {
         "generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
@@ -156,13 +167,9 @@ def main():
              "buy_rank": int(r["buy_rank"]) if "buy_rank" in r else 0}
             for _, r in trades.sort_values("exit_date", ascending=False).iterrows()
         ],
-        "holdings": [
-            {"code": r["code"][-6:], "name": r["name"], "strategy_cn": STRAT_CN[r["strategy"]],
-             "entry_date": str(r["entry_date"].date()), "entry_px": float(r["entry_px"]),
-             "shares": int(r["shares"]), "value": float(r["value"]),
-             "pnl_pct": float(r["pnl_pct"]), "hold_days": int(r["hold_days"])}
-            for _, r in hold[hold["date"] == last_day].sort_values("strategy").iterrows()
-        ],
+        "holdings": hold_list,
+        "hold_value": round(hold_value, 0),
+        "hold_ratio": round(hold_ratio, 4),
         "pending": pending,
         "sell_plan": sell_plan,
         "risk_list": risk_list,
@@ -320,7 +327,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 <table id="planSell"></table>
 <div class="sub-h">② 有可能卖出（距卖出条件很近, 仅供预警）</div>
 <table id="planRisk"></table>
-<div class="sub-h">③ 有可能买入（T日收盘信号候选, 附买入条件与建议仓位）</div>
+<div class="sub-h">③ 有可能买入（T日收盘信号, 按评分取前3, 每日最多买3只）</div>
 <table id="planBuy"></table>
 </div>
 
@@ -437,7 +444,13 @@ function tables(tr){
   document.getElementById('holdTable').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>策略</th><th>买入日</th><th>买价</th><th>股数</th><th>市值(¥)</th><th>持有</th><th>浮动盈亏</th></tr></thead><tbody>`+
     (D.holdings.map(h=>`<tr><td>${h.code}</td><td>${h.name}</td><td>${h.strategy_cn}</td><td>${h.entry_date}</td><td>${h.entry_px.toFixed(2)}</td><td>${h.shares.toLocaleString()}</td><td>${nf(h.value)}</td><td>${h.hold_days}天</td><td class="${cls(h.pnl_pct)}">${fmtPct(h.pnl_pct)}</td></tr>`).join('')||'<tr><td colspan=9 class="note">空仓</td></tr>')+'</tbody>';
-  document.getElementById('holdNote').textContent = `(${D.last_day} 收盘 · 股数按整手交易, 1手=100股)`;
+  const hr = D.hold_ratio || 0, tgt = D.reg_ratio || 0;
+  const diffPt = ((hr - tgt) * 100).toFixed(0);
+  const overNote = (hr - tgt) > 0.02
+    ? ` · 超出目标 ${diffPt}pt (状态机仅约束新开仓, 超额部分随止损/10日到期自然回落, 仅 Z0 强制清仓)`
+    : (hr - tgt) < -0.02 ? ` · 低于目标 ${Math.abs(diffPt)}pt` : '';
+  document.getElementById('holdNote').textContent =
+    `(${D.last_day} 收盘 · ${D.holdings.length}只 · 合计 ¥${nf(D.hold_value||0)} · 实际仓位 ${(hr*100).toFixed(0)}% vs 目标 ${(tgt*100).toFixed(0)}%${overNote})`;
   // 下一交易日计划
   document.getElementById('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行 · 大盘状态 ${D.reg_state}, 目标仓位 ${(D.reg_ratio*100).toFixed(0)}%)`;
   const sp = D.sell_plan || [];

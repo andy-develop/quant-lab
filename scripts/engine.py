@@ -53,7 +53,7 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0):
+def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0, de_risk_pt=0.0):
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -207,6 +207,23 @@ def run_backtest(start=None, min_buy_ratio=0.0, quick_fail=0.0):
                     reason = "vol_shrink"
             if reason:
                 pending_sells[code] = reason
+
+        # ---------- 仓位回归 (实验, de_risk_pt>0 启用): 实际仓位超目标 de_risk_pt -> 次日开盘卖最弱 ----------
+        if de_risk_pt > 0 and ratio > 0:
+            def _val(p):
+                cl = p["last_close"]
+                return p["shares"] * (cl if not np.isnan(cl) else p["entry_qfq"])
+            mv = total - cash
+            budget = total * ratio
+            if mv > budget * (1 + de_risk_pt):
+                for code, pos in sorted(positions.items(), key=lambda kv: _val(kv[1]) / kv[1]["cost"]):
+                    if mv <= budget:
+                        break
+                    if code in pending_sells:
+                        continue
+                    pending_sells[code] = "de_risk"
+                    mv -= _val(pos)
+
         equity.append((day, total))
         if snap:
             for s in snap:
