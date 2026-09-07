@@ -34,6 +34,9 @@ def load_store():
         df = df[~df["code"].isin(set(fix["code"]))]
         df = pd.concat([df, fix], ignore_index=True)
     df["date"] = pd.to_datetime(df["date"])
+    # 统一代码格式为腾讯式 (1.600000/0.000001): 历史分片是 baostock 式 (sh./sz.),
+    # 快照增量是腾讯式 —— 不统一会导致 ratio/除权检测的键全部 miss (冷启动事故)
+    df["code"] = df["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     return df.sort_values(["code", "date"]).reset_index(drop=True)
 
 
@@ -142,6 +145,8 @@ def update_kline():
     hfq_all = sorted(glob.glob(f"{KDIR}/hfq_*.parquet")) + sorted(glob.glob(f"{KDIR}/incremental/hfq_*.parquet"))
     hfq_last = pd.concat([pd.read_parquet(f) for f in hfq_all], ignore_index=True)
     hfq_last["date"] = pd.to_datetime(hfq_last["date"])
+    # 与 load_store 同口径统一代码格式 (hfq 分片是 baostock 式, 增量是腾讯式)
+    hfq_last["code"] = hfq_last["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     hfq_last = hfq_last.groupby("code").tail(1).set_index("code")[["close"]].rename(columns={"close": "hfq_close"})
     rr = last_rows.join(hfq_last, how="inner")
     ratio = (rr["hfq_close"] / rr["close"]).replace([np.inf, -np.inf], np.nan).dropna().to_dict()
@@ -159,9 +164,9 @@ def update_kline():
     # 除权股当日行取自修复序列; 其余用折算
     snap_ok = snap[~snap["is_div"]].copy()
     snap_ok["adj"] = snap_ok["code"].map(ratio).fillna(1.0)
-    inc_raw = snap_ok[["code", "date", "open", "close", "high", "low", "volume", "amount"]]
-    inc_hfq = snap_ok[["code", "date", "open", "close", "high", "low"]].mul(
-        snap_ok["adj"], axis=0)
+    inc_raw = snap_ok[["code", "date", "open", "close", "high", "low", "volume", "amount"]].reset_index(drop=True)
+    ohlc_hfq = snap_ok[["open", "close", "high", "low"]].mul(snap_ok["adj"], axis=0).reset_index(drop=True)
+    inc_hfq = pd.concat([snap_ok[["code", "date"]].reset_index(drop=True), ohlc_hfq], axis=1)
     os.makedirs(f"{KDIR}/incremental", exist_ok=True)
     inc_raw.to_parquet(inc_path, index=False)
     inc_hfq.to_parquet(f"{KDIR}/incremental/hfq_{target_day:%Y%m%d}.parquet", index=False)
@@ -180,6 +185,7 @@ def derive_hfq_fixup(code, qfq_fresh):
     dfs = [pd.read_parquet(f) for f in fixs]
     hf = pd.concat(dfs, ignore_index=True)
     hf["date"] = pd.to_datetime(hf["date"])
+    hf["code"] = hf["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     hf = hf[hf["code"] == code].sort_values("date")
     if hf.empty:
         return None
