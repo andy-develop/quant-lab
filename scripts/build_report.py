@@ -305,6 +305,8 @@ tr:hover td{background:#FAFAF7;}
 .sub-h{font-size:13px;font-weight:600;margin:16px 0 6px;color:#26251F;border-left:3px solid #534AB7;padding-left:8px;}
 .sub-h:first-of-type{margin-top:4px;}
 .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;}
+.fold-btn{float:right;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:3px 14px;font-size:12px;color:var(--muted);cursor:pointer;font-family:inherit;}
+.fold-btn:hover{color:var(--ink);border-color:var(--muted);}
 .tg-a{background:#E6F1FB;color:#185FA5;} .tg-b{background:#E1F5EE;color:#0F6E56;} .tg-c{background:#EEEDFE;color:#534AB7;}
 .warn{background:#FAEEDA;border:1px solid #EF9F27;border-radius:10px;padding:10px 14px;font-size:12.5px;color:#633806;margin-bottom:14px;}
 footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
@@ -343,7 +345,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 
 <div class="card"><h2>当前持仓 <span class="note" id="holdNote"></span></h2><table id="holdTable"></table></div>
 
-<div class="card"><h2>交易明细 <span class="note" id="tradeNote"></span></h2><table id="tradeTable"></table></div>
+<div class="card"><h2>交易明细 <span class="note" id="tradeNote"></span><button class="fold-btn" id="tradeToggle" onclick="toggleTrade()">展开明细 ▾</button></h2><div id="tradeWrap" style="display:none"><table id="tradeTable"></table></div></div>
 
 <div class="card" id="stratDoc"><h2>策略说明</h2>
 __STRAT_DOC__
@@ -357,6 +359,14 @@ const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
 const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
 let rangeN = 0;
+
+// ---------- 交易明细折叠 ----------
+let tradeOpen = false;
+function toggleTrade(){
+  tradeOpen = !tradeOpen;
+  document.getElementById('tradeWrap').style.display = tradeOpen ? '' : 'none';
+  document.getElementById('tradeToggle').textContent = tradeOpen ? '收起明细 ▴' : '展开明细 ▾';
+}
 
 // ---------- 区间切换 ----------
 document.getElementById('rangeTabs').addEventListener('click', e => {
