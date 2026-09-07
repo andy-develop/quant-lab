@@ -1,0 +1,5 @@
+numpy==2.5.2
+pandas==3.0.5
+pyarrow==25.0.1
+baostock==0.9.3
+requests==2.34.2

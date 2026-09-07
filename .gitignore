@@ -1,0 +1,22 @@
+# ---- 派生数据: 每日由 K 线原料全量重算, 不入库 (保证仓库体量有界) ----
+data/meta/flags_long.parquet
+data/meta/signals.parquet
+data/meta/market_regime.parquet
+data/meta/equity.csv
+data/meta/trades.parquet
+data/meta/holdings.parquet
+data/meta/pending_sells.parquet
+data/meta/bs_progress_*.json
+data/meta/backfill_progress.json
+data/meta/upload_hsk.log
+
+# ---- 运行产物 ----
+report/
+data/pool/
+
+# ---- 密钥与其他 ----
+.env
+~/.hsk/
+__pycache__/
+*.pyc
+.DS_Store
