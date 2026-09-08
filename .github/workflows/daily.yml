@@ -31,6 +31,16 @@ jobs:
       - name: 每日数据更新 (K线快照 + 除权修复)
         run: python scripts/daily_update.py
 
+      - name: 每周一刷新 ST 历史状态 (增量, 失败不阻塞)
+        continue-on-error: true
+        run: |
+          if [ "$(date +%u)" = "1" ]; then
+            for w in 0 1 2 3; do python scripts/backfill_st.py incw $w 4 & done; wait
+            python scripts/backfill_st.py incmerge
+          else
+            echo "非周一, 跳过 ST 刷新"
+          fi
+
       - name: 信号扫描 + 组合回测 + 生成报告
         run: python scripts/run_daily.py
 
@@ -41,7 +51,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet
+          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet data/meta/st_history.parquet
           git diff --cached --quiet || git commit -m "data: $(date -u +'%Y-%m-%d')"
           git push
 

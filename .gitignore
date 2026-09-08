@@ -14,6 +14,9 @@ data/meta/bs_progress_*.json
 data/meta/hfq_progress_*.json
 data/meta/backfill_progress.json
 data/meta/upload_hsk.log
+data/meta/st_part_*.parquet
+data/meta/st_progress_*.json
+data/meta/st_inc_part_*.parquet
 
 # ---- 运行产物 ----
 report/

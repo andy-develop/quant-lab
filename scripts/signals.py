@@ -15,9 +15,12 @@
   shrink : 放量滞涨 vol>=2*vol_ma5[-1] 且 收阴
 引擎侧另有: 止损-8%、持有满10日、(开模式) Z0 逃顶清仓。
 注: 趋势破位(破MA20)已于 2026-09-07 移除 —— A/B 证实纯负贡献。
+ST 过滤: 2026-09-08 起用 baostock 逐日 isST 历史(st_history.parquet)按信号日
+状态过滤, 消除"当前名称过滤"的未来函数。
 """
 import glob
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -163,22 +166,37 @@ def exit_flags(df: pd.DataFrame) -> pd.Series:
 
 
 def run_scan() -> pd.DataFrame:
+    t0 = time.time()
     print("加载K线分片...", flush=True)
     hfq = load_klines("hfq")
     raw = load_klines("raw")
     basic = pd.read_parquet(f"{BASE}/data/meta/stock_basic.parquet")
-    # 过滤: ST/退市整理/低价股/北交所(baostock无北交, 天然不含)
-    basic = basic[~basic["name"].str.contains("ST|退", na=False)]
-    keep = set(basic["secid"])
-    hfq = hfq[hfq["code"].isin(keep)]
-    raw = raw[raw["code"].isin(keep)]
-    print(f"K线加载: hfq {len(hfq):,} 行 / raw {len(raw):,} 行 / 有效股票 {hfq['code'].nunique()}", flush=True)
+    st = pd.read_parquet(f"{BASE}/data/meta/st_history.parquet")
+    st_last = pd.to_datetime(st["date"]).max()
+    lag = (pd.Timestamp.today().normalize() - st_last).days
+    if lag > 10:
+        print(f"WARN: st_history 已 {lag} 天未更新(最新 {st_last:%Y-%m-%d}), 跑 backfill_st.py inc 刷新", flush=True)
+    # ST/退市整理 过滤改为逐日状态: 当前名称过滤是未来函数(戴帽前的历史被误删、摘帽股被误留)。
+    # isST==1 的 (code,date) 行在指标计算后剔除; 名称当前含"退"的股票(退市整理期)整段剔除 —— 终态剔除, 保守方向。
+    retire = set(basic[basic["name"].str.contains("退", na=False)]["secid"])
+    print(f"K线加载: hfq {len(hfq):,} 行 / raw {len(raw):,} 行 / 股票 {hfq['code'].nunique()}", flush=True)
 
     df = build_indicators(hfq, raw)
     # 回测窗口: 2023-09-01 起 (指标已在 hfq 全历史上计算, 2023-01 起的前置数据
     # 保证 ret120 在窗口首日即可用 —— 消除"前120日空仓死区"假象, 缺陷③修复)
     df = df[df.index.get_level_values(1) >= pd.Timestamp(START)]
+    # 逐日 ST 剔除: merge isST==1 的 (code,date) 集合
+    idx_df = df.index.to_frame(index=False)
+    idx_df = idx_df.merge(st.loc[st["is_st"] == 1, ["code", "date"]].assign(_bad=True),
+                          on=["code", "date"], how="left")
+    bad = idx_df["_bad"].fillna(False).astype(bool).to_numpy()
+    n_st_rows = int(bad.sum())
+    in_retire = df.index.get_level_values(0).isin(retire)
+    df = df[~bad & ~in_retire]
+    print(f"ST 过滤: 剔除 ST日行 {n_st_rows:,} / 退市整理股 {len(retire)} 只, "
+          f"剩余 {len(df):,} 行 / {df.index.get_level_values(0).nunique()} 只", flush=True)
     print("指标计算完成", flush=True)
+    print(f"[计时] 加载+指标+过滤 {time.time()-t0:.0f}s", flush=True)
 
     market_regime()
     sig_c, score_c = signal_momentum(df)
