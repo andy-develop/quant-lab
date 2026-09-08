@@ -50,3 +50,13 @@ jobs:
           HSK_API_KEY: ${{ secrets.HSK_API_KEY }}
           HSK_RESOURCE_ID: ${{ secrets.HSK_RESOURCE_ID }}
         run: bash scripts/upload_hsk.sh
+
+      - name: 仓库体积监控
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SIZE_KB=$(gh api "repos/${{ github.repository }}" --jq '.size')
+          echo "仓库体积: $((SIZE_KB/1024)) MB"
+          if [ "$SIZE_KB" -gt 1048576 ]; then
+            echo "::warning::仓库已超过 1GB —— 数据外置到 GitHub Releases (2GB/文件, 不计仓库体积) 或 filter-repo 瘦身历史"
+          fi
