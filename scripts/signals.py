@@ -103,6 +103,16 @@ def build_indicators(hfq: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     df.loc[~bull, "trend_streak"] = 0
     # Amihud 非流动性: 20日平均 |日收益|/成交额(元); amt=0(停牌) -> NaN, 评分日候选自然剔除
     df["illiq20"] = groll((df["ret"].abs() / df["amt"].replace(0, np.nan)), 20, "mean")
+    # KDJ(9,3,3) 的 J 值: RSV -> K/D 递推(ewm alpha=1/3, 按股分组不跨股泄漏) -> J=3K-2D
+    hh9 = groll(df["high"], 9, "max")
+    ll9 = groll(df["low"], 9, "min")
+    rsv = (df["close"] - ll9) / (hh9 - ll9).replace(0, np.nan) * 100
+    k = rsv.groupby(level=0, sort=False).transform(lambda x: x.ewm(alpha=1/3, adjust=False).mean())
+    d = k.groupby(level=0, sort=False).transform(lambda x: x.ewm(alpha=1/3, adjust=False).mean())
+    df["kdj_j"] = 3 * k - 2 * d
+    # J 均值偏离: 20日均J - 当日J。正=昨日J自高位回落(回调), 负=J加速上冲(超买)。
+    # "昨日"= 信号日T收盘(对T+1开盘买入而言T日即昨日); 如需 T-1 口径改用 gshift(df["kdj_j"], 1)
+    df["j_dev"] = groll(df["kdj_j"], 20, "mean") - df["kdj_j"]
 
     return df
 
@@ -171,7 +181,7 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return sig, score
 
 
-SCORE_MODE = "quality"    # momentum | quality | amihud | voladj —— 2026-09-08 两轮 A/B: quality 胜出(关模式隔离组 +43.7% vs 纯动量-78.3%, 开模式回撤-45.9%->-20.8%); amihud +5.0% 淘汰; voladj(调整后动量=ret20/vol20×指数波动率, 秩上≡ret20/vol20) +21.8%/-30.5% 淘汰
+SCORE_MODE = "quality"    # momentum | quality | amihud | voladj | kdj | kdj_rev —— 2026-09-08 三轮 A/B: quality 胜出; kdj(20日均J-信号日J, 低吸方向) 开+26.5%/-37.0% 关-36.2%, 劣于 quality; kdj_rev(追涨方向) 开-51.4% 关-94.5% 灾难性, 方向性极强说明 J 偏离有信息但单因子弱于合成
 
 
 def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[str, pd.Series]:
@@ -183,6 +193,9 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
       voladj  : 调整后动量 = ret20/vol20 × 当日指数20日波动率。注: 引擎按日横截面
                 排序消费 score, 指数波动率是日级常数, 乘上去秩不变 —— 实际生效部分
                 是 ret20/vol20 (波动率调整动量/动量夏普); 保留因子是为公式忠实。
+      kdj     : KDJ均值偏离 = 20日均J - 信号日J (用户公式)。值大=J自高位回落,
+                偏好强势股中的短期回调 (低吸方向)
+      kdj_rev : kdj 的反向对照 (-j_dev), 偏好 J 加速上冲 (追涨方向), 用于检验方向
     """
     rk = lambda s: s.groupby(level=1).rank(pct=True)
     mom = rk(df["ret20"])
@@ -196,7 +209,8 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
                + 0.15 * rk(df["trend_streak"])
                + 0.10 * rk(-df["vol20"]))
     amihud = mom * rk(1.0 / df["illiq20"])
-    return {"momentum": mom, "quality": quality, "amihud": amihud, "voladj": voladj}
+    return {"momentum": mom, "quality": quality, "amihud": amihud, "voladj": voladj,
+            "kdj": rk(df["j_dev"]), "kdj_rev": rk(-df["j_dev"])}
 
 
 def exit_flags(df: pd.DataFrame) -> pd.Series:
