@@ -12,11 +12,10 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根�
 META, POOL = f"{BASE}/data/meta", f"{BASE}/data/pool"
 STRAT_CN = {"momentum": "动量轮动"}
 REASON_CN = {"stop_loss": "止损", "vol_shrink": "放量滞涨",
-             "expired": "持有到期", "market_exit": "逃顶清仓", "quick_fail": "快速认错"}
+             "expired": "持有到期", "quick_fail": "快速认错"}
 REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
                "vol_shrink": "成交量≥2×5日均量且收阴",
                "expired": "持有满 10 个交易日",
-               "market_exit": "大盘触发 Z0 空仓信号, 全线清仓",
                "quick_fail": "首日收盘浮亏超阈值"}
 WINDOW_DAYS = 244        # 报告窗口: 近一年(交易日)
 
@@ -60,13 +59,6 @@ def main():
         x["code"] = x["code"][-6:]
         x["strategy_cn"] = STRAT_CN[x["strategy"]]
         x["date"] = str(pd.Timestamp(x["date"]).date())
-
-    # ---- 大盘状态 (建议仓位用) ----
-    reg_state, reg_ratio = "-", 0.0
-    if os.path.exists(f"{META}/market_regime.parquet"):
-        _reg = pd.read_parquet(f"{META}/market_regime.parquet")
-        reg_state = str(_reg.iloc[-1]["state"])
-        reg_ratio = float(_reg.iloc[-1]["target_ratio"])
 
     # ---- 下个交易日卖出计划: 收盘已挂单的持仓 ----
     sell_plan = []
@@ -164,8 +156,6 @@ def main():
         "pending": pending,
         "sell_plan": sell_plan,
         "risk_list": risk_list,
-        "reg_state": reg_state,
-        "reg_ratio": reg_ratio,
     }
 
     html = render_html(payload)
@@ -197,7 +187,7 @@ STRAT_DOC = """
 <div class="doc">
 
 <h3>一、策略总览</h3>
-<p>本系统为<b>纯日线量化选股系统</b>，运行于 A 股市场，目标持仓 5–10 个交易日，每日最多新开仓 3 只，总仓位由大盘状态机控制。策略层与执行层完全分离：策略只在 T 日收盘后基于当日及历史数据产生信号，T+1 日开盘价执行，<b>任何信号均不使用未来数据</b>（已两次专项排查未来函数：信号对齐 T-1、状态机对齐 T-1）。</p>
+<p>本系统为<b>纯日线量化选股系统</b>，运行于 A 股市场，目标持仓 5–10 个交易日，每日最多新开仓 3 只，始终满仓运行（最多同时持有 10 只，无大盘择时）。策略层与执行层完全分离：策略只在 T 日收盘后基于当日及历史数据产生信号，T+1 日开盘价执行，<b>任何信号均不使用未来数据</b>（已两次专项排查未来函数：信号对齐 T-1）。</p>
 
 <h3>二、选股策略 · 动量轮动（momentum）</h3>
 <p>经典横截面动量策略，买强势股的惯性延续。同时满足以下全部条件才触发信号：</p>
@@ -211,23 +201,12 @@ STRAT_DOC = """
 </ul>
 <p><b>股票池过滤</b>：剔除 ST、*ST、退市整理期个股；北交所因数据源不支持天然不含。全池基于 baostock 日线（含退市股，规避幸存者偏差）。价格口径：信号与收益使用<b>后复权序列</b>（历史值永久冻结，任意日期重跑结果可复现），成交明细展示不复权真实价；流动性过滤使用<b>真实成交额</b>（非前复权近似）。</p>
 
-<h3>三、大盘仓位状态机（「买卖点」，锚定上证指数）</h3>
-<p>总仓位不靠主观判断，由上证指数均线状态决定，参考用户腾讯文档《买卖点》实现为四态状态机。当日目标仓位由<b>前一交易日收盘状态</b>决定（防未来函数）：</p>
-<table>
-<thead><tr><th>状态</th><th>目标仓位</th><th>触发条件</th><th>含义</th></tr></thead>
-<tbody>
-<tr><td><b>Z0 空仓</b></td><td>0%（清仓）</td><td>5MA&lt;10MA 且 5MA&lt;20MA；或 5MA&lt;20MA 且当日跌幅&lt;-1%</td><td>逃顶：触发当日所有持仓挂卖出</td></tr>
-<tr><td><b>Z1 轻仓</b></td><td>30%</td><td>5MA 与 10MA 同时拐头向上（抄底/回补）；或重仓/半仓状态收盘跌破 20 日线</td><td>大跌后试探性回补</td></tr>
-<tr><td><b>Z2 半仓</b></td><td>50%</td><td>收盘站上 20 日线；或 Z3 状态收盘跌破 10 日线</td><td>趋势修复中，半仓参与</td></tr>
-<tr><td><b>Z3 重仓</b></td><td>100%</td><td>收盘 &gt; 5MA &gt; 10MA &gt; 20MA（均线多头排列）</td><td>多头行情全仓参与</td></tr>
-</tbody>
-</table>
-<p>除状态切换外，同状态内仓位阶梯回落：重仓破 10 日线降半仓、破 20 日线降轻仓。回测全期该状态机处于「逃顶清仓」（Z0）共 297 个交易日（占比约 41%），其中近一年 93 天（38%），是回撤控制的主要来源。仓位控制以「约束新开仓」实现：状态降档后存量持仓随止损/到期自然回落（不做强制减仓，仅 Z0 强制清仓）。</p>
-<p><b>锚定指数 A/B（移除趋势破位后重测）</b>：<b>中证1000锚定全面占优</b>——全期 +70.0% vs 上证 +32.2%，最大回撤 -37.3% vs -47.7%，夏普 0.79 vs 0.49，分年 2024 +3.2% vs -30.5%、2025 +36.6% vs +30.1%、2026 +32.4% vs +64.2%。原因：本策略持仓为小盘动量股，中证1000 与其相关性远高于上证，2024 年初微盘踩踏中中证1000 状态机更早触发 Z0 空仓、真实躲过踩踏。<b>当前版本仍锚定上证，换锚待决策</b>——若切换，收益/回撤/夏普全面改善，代价是 2026 年这类指数大年收益兑现变慢。</p>
+<h3>三、仓位管理（无大盘择时）</h3>
+<p>本策略<b>始终满仓运行</b>：最多同时持有 10 只、每日最多新开仓 3 只、单只预算 ≈ 总资金/10（整手买入）。不设大盘仓位状态机。</p>
+<p><b>已移除的规则 · 大盘仓位状态机（「买卖点」Z0–Z3，锚定上证指数）</b>：A/B 复核显示该状态机是回测中回撤控制的主要来源——保留时全期 +32.2%（夏普 0.49，回撤 -47.7%），完全移除后 -78.4%（2024 年 -72.1%），仅保留 Z0 逃顶清仓而无仓位预算也有 -59.5%。但状态机依赖指数均线的频繁状态切换、规则复杂度与实盘执行摩擦较高，经权衡后于 2026-09-07 移除，<b>代价是策略将裸露于系统性下跌（如 2024 年初微盘踩踏）</b>。若未来回撤不可接受，可参考 git 历史恢复（commit 4e32f55 及之前版本含完整状态机）。</p>
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
-<li><b>逃顶清仓</b>：大盘进入 Z0 空仓状态，全部持仓无条件挂卖（最高优先级）；</li>
 <li><b>止损</b>：收盘价 ≤ 买入价 × 0.92（-8%硬止损）；</li>
 <li><b>持有到期</b>：持有满 10 个交易日强制退出；</li>
 <li><b>放量滞涨</b>：持有 ≥ 2 日后，成交量 ≥ 2 × 前一日5日均量且当日收阴（主力出货嫌疑）。</li>
@@ -238,7 +217,7 @@ STRAT_DOC = """
 <ul>
 <li><b>执行时点</b>：T 日收盘出信号（含退出判定），T+1 日开盘价成交，先卖后买；</li>
 <li><b>A股规则内建</b>：T+1（买入当日不可卖）；开盘涨停（开盘价≥涨停价）放弃买入；开盘跌停顺延至下一开盘卖出；停牌顺延；</li>
-<li><b>整手交易</b>：买入股数为 100 股整数倍、最低 1 手，单只预算 ≈ 总资金/10，且不超过状态机目标仓位对应预算；</li>
+<li><b>整手交易</b>：买入股数为 100 股整数倍、最低 1 手，单只预算 ≈ 总资金/10；</li>
 <li><b>成本</b>：佣金万1（双边，单笔最低 5 元）+ 印花税 0.05%（卖出）+ 滑点 0.1%（单边）；</li>
 <li>涨跌幅限制按板块区分：主板 10%，创业板/科创板 20%；停牌复牌首日跳空以复牌开盘价对比停牌前收盘判定；</li>
 </ul>
@@ -299,7 +278,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 <div class="wrap">
 <h1>A股短线策略实验室</h1>
 <div class="sub" id="sub"></div>
-<div class="warn" style="margin-top:14px">本报告回测覆盖<b>动量轮动</b>策略。仓位控制: 每日最多买入 3 只, 总仓位按<b>上证指数「买卖点」状态机</b>调节 (Z0 空仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%)。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。</div>
+<div class="warn" style="margin-top:14px">本报告回测覆盖<b>动量轮动</b>策略, 始终满仓运行(最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。</div>
 
 <div class="tabs" id="rangeTabs">
   <div class="tab" data-n="5">近一周</div>
@@ -457,15 +436,11 @@ function tables(tr){
   document.getElementById('holdTable').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>策略</th><th>买入日</th><th>买价</th><th>股数</th><th>市值(¥)</th><th>持有</th><th>浮动盈亏</th></tr></thead><tbody>`+
     (D.holdings.map(h=>`<tr><td>${h.code}</td><td>${h.name}</td><td>${h.strategy_cn}</td><td>${h.entry_date}</td><td>${h.entry_px.toFixed(2)}</td><td>${h.shares.toLocaleString()}</td><td>${nf(h.value)}</td><td>${h.hold_days}天</td><td class="${cls(h.pnl_pct)}">${fmtPct(h.pnl_pct)}</td></tr>`).join('')||'<tr><td colspan=9 class="note">空仓</td></tr>')+'</tbody>';
-  const hr = D.hold_ratio || 0, tgt = D.reg_ratio || 0;
-  const diffPt = ((hr - tgt) * 100).toFixed(0);
-  const overNote = (hr - tgt) > 0.02
-    ? ` · 超出目标 ${diffPt}pt (状态机仅约束新开仓, 超额部分随止损/10日到期自然回落, 仅 Z0 强制清仓)`
-    : (hr - tgt) < -0.02 ? ` · 低于目标 ${Math.abs(diffPt)}pt` : '';
+  const hr = D.hold_ratio || 0;
   document.getElementById('holdNote').textContent =
-    `(${D.last_day} 收盘 · ${D.holdings.length}只 · 合计 ¥${nf(D.hold_value||0)} · 实际仓位 ${(hr*100).toFixed(0)}% vs 目标 ${(tgt*100).toFixed(0)}%${overNote})`;
+    `(${D.last_day} 收盘 · ${D.holdings.length}只 · 合计 ¥${nf(D.hold_value||0)} · 实际仓位 ${(hr*100).toFixed(0)}%)`;
   // 下一交易日计划
-  document.getElementById('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行 · 大盘状态 ${D.reg_state}, 目标仓位 ${(D.reg_ratio*100).toFixed(0)}%)`;
+  document.getElementById('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行)`;
   const sp = D.sell_plan || [];
   document.getElementById('planSell').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>卖出条件</th></tr></thead><tbody>`+
@@ -476,11 +451,8 @@ function tables(tr){
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>风险提示</th></tr></thead><tbody>`+
     (rl.map(r=>`<tr><td>${r.code}</td><td>${r.name}</td><td>${r.entry_date}</td><td>${r.hold_days}天</td><td class="${cls(r.pnl_pct)}">${fmtPct(r.pnl_pct)}</td><td>${r.risks.map(x=>'<span style="color:#633806">⚠</span> '+x).join('<br>')}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">当前无接近卖出条件的持仓</td></tr>')+'</tbody>';
-  const ratioPct = (D.reg_ratio*100).toFixed(0);
-  const perStock = D.reg_ratio>0 ? '单只 ≤ 10% 总资金 (整手买入, 最低1手)' : '—';
-  const buyCond = D.reg_ratio>0
-    ? `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 总仓位不超过 ${ratioPct}% (${D.reg_state})`
-    : `大盘处于空仓状态 (Z0), 暂不开新仓; 待状态机回升至 Z1 及以上恢复买入`;
+  const perStock = '单只 ≤ 10% 总资金 (整手买入, 最低1手)';
+  const buyCond = `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 最多同时持有 10 只`;
   document.getElementById('planBuy').innerHTML =
     `<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>评分</th><th>建议仓位</th><th>买入条件</th></tr></thead><tbody>`+
     (D.pending.map(p=>`<tr><td>第${p.rank}名</td><td>${p.code}</td><td>${p.name}</td><td>${p.score.toFixed(3)}</td><td>${perStock}</td><td>${buyCond}</td></tr>`).join('')
@@ -511,9 +483,9 @@ function renderAll(){
 document.getElementById('sub').textContent =
   `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (近一年) · 初始资金 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('foot').innerHTML =
-  `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
-   仓位控制: 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
-   买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
+  `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
+   仓位控制: 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
+   买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
    策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
 
 eqChart = echarts.init(document.getElementById('eqChart'));

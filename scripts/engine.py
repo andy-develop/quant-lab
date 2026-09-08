@@ -5,14 +5,13 @@
   - 开盘跌停无法卖出 -> 顺延至下一开盘
   - 停牌(当日无K线)跳过
   - 成本: 佣金万1双边(最低5元) + 印花税0.05%(卖出) + 滑点0.1%单边
-  - 仓位控制: 每日最多买入3只; 总仓位锚定上证指数买卖点状态机
-    (Z0空仓0%且清仓 / Z1轻仓30% / Z2半仓50% / Z3重仓100%), 见 signals.market_regime
+  - 仓位: 每日最多买入3只, 最多同时持有10只; 等权分仓(总权益/10)
   - T+1: 买入次日不可卖(引擎天然满足: 卖出信号在收盘判定, 最早次日开盘执行)
 会计口径: 后复权价格(hfq, 连续且历史值永久冻结)做信号/涨跌停判定/估值/现金流;
 交易流水展示不复权价。hfq 与 qfq 的区间收益率完全一致(复权因子在比值中约掉)。
-预算控制: 持仓市值实时按最近收盘价重算(不维护增量记账, 避免已实现盈亏泄漏)。
-注: 趋势破位(破MA20)退出规则已于 2026-09-07 移除 —— A/B 证实纯负贡献
-(74笔合计-17.7万, 删除后全期 +22.5% -> +32.2%, 夏普 0.39 -> 0.49)。
+注: 大盘仓位状态机(Z0-Z3)已于 2026-09-07 按用户决策移除。
+A/B 数据(供回溯): 保留状态机 +32.2%/夏普0.49/回撤-47.7%; 完全移除 -78.4%/夏普-1.01
+(2024年 -72.1%); 仅保留Z0逃顶无预算 -59.5%。删除是用户在知悉数据后的明确选择。
 """
 import os
 
@@ -66,7 +65,7 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None, regime_file=None):
+def run_backtest(start=None):
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -85,12 +84,6 @@ def run_backtest(start=None, regime_file=None):
     no_buy = open_ret >= (pct_frame - 0.002)          # 开盘涨停/接近一字 -> 买不进
     no_sell = open_ret <= -(pct_frame - 0.002)        # 开盘跌停 -> 卖不出
 
-    # 大盘仓位状态机 (买卖点, 默认锚定上证指数; regime_file 可替换如中证1000)
-    # 关键: 状态由 T 日收盘计算, T 日开盘不可见 -> 必须平移一日, 用 T-1 收盘状态驱动 T 日开盘动作 (防未来函数)
-    regime = pd.read_parquet(regime_file or f"{BASE}/data/meta/market_regime.parquet")
-    regime["date"] = pd.to_datetime(regime["date"])
-    regime = regime.set_index("date")["target_ratio"].shift(1)
-
     cash = START_CAP
     positions = {}   # code -> dict
     trades, holdings_daily = [], []
@@ -99,18 +92,6 @@ def run_backtest(start=None, regime_file=None):
     cal_pos = {d: i for i, d in enumerate(cal)}
 
     for day in cal:
-        if day in regime.index:
-            ratio = float(regime.at[day])
-        else:
-            ratio = float(regime.asof(day)) if len(regime) else 1.0
-        max_invest = (equity[-1][1] if equity else START_CAP) * ratio
-
-        # ---------- 逃顶: Z0 空仓 -> 全部挂卖出 ----------
-        if ratio <= 0.0:
-            for code in positions:
-                if code not in pending_sells:
-                    pending_sells[code] = "market_exit"
-
         # ---------- 开盘: 先卖后买 ----------
         for code in list(pending_sells):
             reason = pending_sells[code]
@@ -137,15 +118,10 @@ def run_backtest(start=None, regime_file=None):
             del pending_sells[code]
 
         # 买入: 【前一交易日收盘】的信号 -> 今日开盘执行 (防未来函数)
-        # 仓位控制: 每日最多 MAX_BUY_PER_DAY 只; 持仓市值不得超过 max_invest (状态机目标仓位)
-        # 持仓市值 mv 实时按最近收盘价重算 (缺陷修复: 不再增量记账, 杜绝已实现盈亏泄漏)
+        # 仓位: 每日最多 MAX_BUY_PER_DAY 只, 等权 slot = 总权益/MAX_POS (受可用现金约束)
         prev_day = cal[cal_pos[day] - 1] if cal_pos[day] > 0 else None
-        mv = 0.0
-        for pos_ in positions.values():
-            cl_ = pos_.get("last_close", np.nan)
-            mv += pos_["shares"] * (cl_ if not np.isnan(cl_) else pos_["entry_adj"])
         cands = []
-        if prev_day is not None and ratio >= 0.001:
+        if prev_day is not None:
             for strat, sw in sig_w.items():
                 if prev_day in sw.index:
                     row = sw.loc[prev_day].dropna()
@@ -158,8 +134,6 @@ def run_backtest(start=None, regime_file=None):
         for rank_c, (sc, strat, code) in enumerate(cands, 1):
             if free <= 0 or n_try >= MAX_BUY_PER_DAY:
                 break
-            if mv >= max_invest - 1000:         # 预算用尽 (1000元容差)
-                break
             if code in held:
                 continue
             px = qo.at[day, code] if code in qo.columns else np.nan
@@ -168,15 +142,13 @@ def run_backtest(start=None, regime_file=None):
             if code in no_buy.columns and bool(no_buy.at[day, code]):
                 continue                      # 开盘涨停买不进
             slot = min(equity[-1][1] / MAX_POS if equity else START_CAP / MAX_POS,
-                       cash / max(free, 1),
-                       max_invest - mv)       # 不超目标仓位预算
+                       cash / max(free, 1))
             shares = int(slot / (px * 100)) * 100
             if shares < 100:
                 continue
             cost = shares * px * (1 + SLIP)
             fee = buy_fee(cost)
             cash -= cost + fee
-            mv += cost + fee
             n_try += 1
             positions[code] = {
                 "name": names.get(code, code), "strategy": strat,
