@@ -1,0 +1,114 @@
+# HANDOFF.md — quant-lab A股短线选股系统 · 交接文档
+
+> 最后更新: 2026-09-08 · 当前 HEAD: `814f4f3` (main, 已推送 GitHub)
+> 项目: 日选约 10 支、持仓 5–10 天的 A 股动量策略, 全自动每日更新 + 静态网页报告
+
+---
+
+## 1. 系统概览
+
+```
+数据源                     每日链路 (GitHub Actions, 北京 16:30)            输出
+─────────                ────────────────────────────────────          ─────────
+baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修复+指数    data/kline/
+腾讯行情 (每日快照)  ──►  (周一另跑) backfill_st.py incw/incmerge       data/meta/
+                         signals.py        信号扫描+指标+ST过滤         signals/flags
+                         engine.py         双模式回测(开/关仓位控制)     equity/trades
+                         build_report.py   静态 HTML 报告(双 payload)   report/
+                         upload_hsk.sh     上传托管 ──► https://kpqv8z.gicp.fun
+```
+
+- **仓库**: `github.com/andy-develop/quant-lab` (private, main), CI: `.github/workflows/daily.yml` (cron `30 8 * * 1-5` UTC = 北京 16:30, 可手动 dispatch)
+- **价格口径**: 信号/回测全用 **hfq 后复权** (历史值永久冻结, 可复现); 量/额用 raw 真实值; qfq 已弃用
+- **数据分发**: K 线分片 + 5 个源数据 parquet 随 git 仓库分发 (clone 即得全量历史), 派生文件不入库
+
+## 2. 脚本清单 (scripts/)
+
+| 脚本 | 职责 |
+|---|---|
+| `fetch_universe.py` | 股票池 + 上证/沪深300/中证1000 指数日线 |
+| `backfill_kline.py` / `backfill_baostock.py` | raw+qfq 历史回补 (腾讯/baostock 双源, 4 worker) |
+| `backfill_hfq.py` | hfq 后复权回补 (2023-01 起, 26 分片) |
+| `backfill_st.py` | **逐日 ST 状态回补/增量/合并** (isST 字段, → st_history.parquet) |
+| `daily_update.py` | 每日快照增量 + 除权修复(fixup) + 指数快照; `load_store()` 统一读库 |
+| `signals.py` | 指标计算、动量选股、三套评分(momentum/quality/amihud)、大盘状态机 Z0-Z3 |
+| `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir)`; 止损-8%/持有10日/放量滞涨/Z0清仓 |
+| `run_daily.py` | 编排: 双口径回测 → data/meta(开) + data/meta_no(关); 关键步骤失败即中止 |
+| `build_report.py` | 静态报告: 双 payload 内嵌, 右上角"仓位控制 开/关"切换 |
+| `trim_data.py` | 数据滚动清理 |
+| `upload_hsk.sh` | 报告上传坚果云托管 |
+
+## 3. 当前策略状态 (2026-09-08 上线版)
+
+**选股 (momentum, 未变)**: 20日收益横截面 Top5% + 收盘>MA20>MA60 + MA60 上行 + ret20<60% + ret120>0 + 20日均额≥3000万
+
+**评分/买入优先级 (本日新上线, `SCORE_MODE="quality"`)**: 按日横截面排名分位加权 ——
+动量30% + 20日夏普25% + 60日上涨胜率20% + MA多头连续天数15% + 低波动10%
+(只影响同日多信号的买入顺序/名额竞争, 不改选股条件)
+
+**ST 过滤**: 按信号日逐日 isST 状态剔除 (st_history.parquet, 440万行/902KB 入库); 当前含"退"股整段剔除; st_history 落后>10天自动 WARN, 周一 CI 自动增量刷新
+
+**退出**: 止损 -8% / 持有满 10 日 / 放量滞涨(vol≥2×vol_ma5 且收阴) / (开模式) Z0 逃顶清仓
+
+**仓位双口径 (页面右上角切换, 默认开)**:
+- 开: 上证"买卖点"状态机 Z0空0%/Z1轻30%/Z2半50%/Z3重100%, 每日最多新开 3 只
+- 关: 满仓, 最多 10 只, 单只预算≈总资金/10
+
+**全窗口回测 (2023-09 ~ 2026-09, 初始 100 万)**:
+
+| 口径 | 收益 | 最大回撤 | 夏普 | 交易 | 胜率 |
+|---|---|---|---|---|---|
+| 开 (默认) | +31.8% | **-20.8%** | 0.61 | 460 | 39.1% |
+| 关 | +43.7% | -38.2% | 0.57 | 845 | 42.0% |
+
+## 4. 已完成里程碑 (时间线)
+
+| 版本/commit | 内容 |
+|---|---|
+| `a351707` init | 系统初建: 选股/回测/报告/每日更新 |
+| v10 `6c55473` | 交易明细默认折叠 + 展开按钮 |
+| `927c422`+`a987fbf` | **外部审查五项修复**: invested 记账泄漏(持仓市值实时重算)、limit_pct 永不命中(剥离前缀)、前120日死区(hfq+指数回补至2023-01)、qfq 不可复现→全切 hfq、佣金下限等; baostock volume 单位是股非手 |
+| v11 `f1e0a78` | bench1000 报告窗口切片错位修复 ("一周+60%"假象) |
+| v12 `4e32f55` | 删趋势破位退出 (A/B: 纯负贡献, 74笔-17.7万) + 净值图加中证1000基准 |
+| v13 `79e02f5` | 彻底删仓位状态机 (用户决策, A/B 显示 -78.4% 仍坚持) |
+| v14 `051ad99` | 恢复双口径 + 右上角切换按钮 (默认开) |
+| v15 `41846b7` | 报告窗口改去年同期(自然日)起, 两模式起点归一 100 万 |
+| `e6c0b7b` | **load_store 修复**: 代码格式先统一再 fixup 覆盖 (消除 3 只股整段重复行); fixup glob 限定 raw 件; 回补截止日动态化; 补指数 09-07 快照 |
+| `b9f2a50` | 代码质量: 去重 import/shebang 顺序/with 句柄/全函数类型注解/engine 魔法数字提常量(LOT_SIZE等4个)/run_daily 关键步骤失败即中止(fatal) |
+| `7358ac3` | 否决 Git LFS (论证见下) + CI 仓库体积监控(超1GB warning) |
+| `504b07a` | **ST 未来函数修复**: 逐日 isST 替代当前名称过滤; backfill_st.py + 周一 CI 增量刷新; A/B 开模式 +32.2%→+50.9% (修复前口径) |
+| `814f4f3` | **评分因子升级**: 纯动量 → 趋势质量五因子合成 (A/B 三方案, quality 胜出); 开模式回撤 -45.9%→-20.8% |
+
+## 5. 关键 A/B 决策记录 (防翻案, 均有数据)
+
+1. **趋势破位退出规则**: 删除。74 笔 -17.7 万, W/L 0.51, 纯负贡献
+2. **仓位状态机**: 开 +50.9%(修复后口径) vs 关 +43.7%; 若仅看旧口径 开+32.2% vs 关-78.4% —— 状态机是核心风控, 保留
+3. **状态机锚定**: 上证 (中证1000 锚定 A/B 不采纳)
+4. **评分因子**: quality 胜出 (关模式隔离组 +43.7% vs 纯动量 -78.3%, 最干净的隔离组); amihud 淘汰 (+5.0%, 且公式方向与"回避低流动"动机矛盾, 固定滑点下低流动回测虚高)
+5. **Git LFS**: 否决。私库免费配额 1GB/月带宽比 git 本体更紧且同样只增不减; 稳态日增 0.2-0.5MB, 真超标走 GitHub Releases + filter-repo
+6. **指标增量计算/polars**: 否决。全量重算实测 ~25s, CI 90min 用 <5%; 重估触发: 扫描>3min 或股票池翻倍
+
+## 6. 已知限制与遗留事项
+
+- **quality 评分无样本外验证**: 单窗口 (2023-2026) 回测, 建议半年后滚动窗口复核; 若极端动量行情可能跑输纯动量 (`SCORE_MODE` 一行可回滚)
+- **slot 变紧后 100 股零头买入**: 华锦/楚天龙/赤天龙出现单笔 ~5000 元门槛以下买入, 可考虑最低金额门槛 (需 A/B)
+- **退市整理股整段剔除**: "当前含退→删全历史"仍是轻微保守方向的未来函数 (影响极小, 已文档化)
+- **ST 刷新依赖 baostock 在 CI 的可用性**: continue-on-error, 失败仅 WARN 不阻塞
+- **单笔 5 万元档买入的手续费下限 5 元**已建模; 滑点固定 0.1%, 未建模冲击成本
+
+## 7. 运维要点
+
+- **手动触发**: `gh workflow run daily.yml --ref main`; 监控 `gh run watch <run_id> --repo andy-develop/quant-lab`
+- **推送绕代理**: `git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 push origin main` (本机代理对 github.com CONNECT 502)
+- **数据校验**: `python skills/quant-lab-data/scripts/verify_store.py` (只读, 查重复/对齐/缺口)
+- **多日数据缺口**: 走 fixup 整段重拉 (见 quant-lab-data skill 第 4 节), daily_update 一次只补一天
+- **报告未更新排查**: CI 日志 grep "评分模式" / "总收益" / "上传"; 线上 curl https://kpqv8z.gicp.fun 确认
+
+## 8. 硬性陷阱 (违反即数据损坏, 详见 ~/.workbuddy/skills/quant-lab-data/SKILL.md)
+
+1. 代码格式两套并存 (baostock `sh.` vs 腾讯 `1.`) — 读库必须先统一, 且在 fixup 覆盖**之前**
+2. fixup glob 只匹配对应口径 (`fixup/raw_*.parquet`)
+3. hfq 历史值永久冻结; 重复回补 = 成倍重复行
+4. baostock volume 单位是股; 腾讯快照 parts[37] 是万元
+5. **同一文件多处修改严禁并行 Edit** (竞态丢改动, 本项目踩过两次)
+6. 后台 Bash 不继承 cwd, 一律绝对路径
