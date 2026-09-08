@@ -171,26 +171,32 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return sig, score
 
 
-SCORE_MODE = "quality"    # momentum | quality | amihud —— 2026-09-08 A/B: quality 胜出(关模式隔离组 +43.7% vs -78.3%, 开模式回撤减半), amihud 淘汰(+5.0%)
+SCORE_MODE = "quality"    # momentum | quality | amihud | voladj —— 2026-09-08 两轮 A/B: quality 胜出(关模式隔离组 +43.7% vs 纯动量-78.3%, 开模式回撤-45.9%->-20.8%); amihud +5.0% 淘汰; voladj(调整后动量=ret20/vol20×指数波动率, 秩上≡ret20/vol20) +21.8%/-30.5% 淘汰
 
 
-def signal_scores(df: pd.DataFrame) -> dict[str, pd.Series]:
+def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[str, pd.Series]:
     """候选股买入优先级评分 (0-1, 按日横截面排名分位)。只影响同日多信号时的
-    买入顺序/名额竞争, 不改变选股条件。三套口径 A/B 后择优:
+    买入顺序/名额竞争, 不改变选股条件。四套口径 A/B 后择优:
       momentum: 纯 20 日动量 (原版)
       quality : 中泰金工趋势质量合成 0.3动量+0.25夏普+0.2胜率+0.15趋势一致性+0.1低波动
-      amihud  : 动量 × 流动性分位 (Amihud 非流动性倒数排名, 奖励低流动性溢价;
-                用户原始公式 评分×(1/Amihud) 的秩归一版, 避免量纲主导)
+      amihud  : 动量 × 流动性分位 (Amihud 非流动性倒数排名; 2026-09-08 淘汰)
+      voladj  : 调整后动量 = ret20/vol20 × 当日指数20日波动率。注: 引擎按日横截面
+                排序消费 score, 指数波动率是日级常数, 乘上去秩不变 —— 实际生效部分
+                是 ret20/vol20 (波动率调整动量/动量夏普); 保留因子是为公式忠实。
     """
     rk = lambda s: s.groupby(level=1).rank(pct=True)
     mom = rk(df["ret20"])
+    sharpe_raw = df["ret20"] / df["vol20"].where(df["vol20"] > 0)   # vol20=0 -> NaN
+    voladj = rk(sharpe_raw)
+    if idx_vol is not None:
+        voladj = voladj * pd.Series(df.index.get_level_values(1).map(idx_vol).to_numpy(), index=df.index)
     quality = (0.30 * mom
                + 0.25 * rk(df["sharpe20"])
                + 0.20 * rk(df["win60"])
                + 0.15 * rk(df["trend_streak"])
                + 0.10 * rk(-df["vol20"]))
     amihud = mom * rk(1.0 / df["illiq20"])
-    return {"momentum": mom, "quality": quality, "amihud": amihud}
+    return {"momentum": mom, "quality": quality, "amihud": amihud, "voladj": voladj}
 
 
 def exit_flags(df: pd.DataFrame) -> pd.Series:
@@ -233,8 +239,10 @@ def run_scan() -> pd.DataFrame:
     print(f"[计时] 加载+指标+过滤 {time.time()-t0:.0f}s", flush=True)
 
     market_regime()
+    idx_close = pd.read_parquet(f"{BASE}/data/meta/index_daily.parquet").set_index("date")["close"].sort_index()
+    idx_vol20 = idx_close.pct_change().rolling(20).std()
     sig_c, _ = signal_momentum(df)
-    score_c = signal_scores(df)[SCORE_MODE]
+    score_c = signal_scores(df, idx_vol=idx_vol20)[SCORE_MODE]
     shrink = exit_flags(df)
 
     names = basic.set_index("secid")["name"]

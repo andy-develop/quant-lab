@@ -31,7 +31,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 | `backfill_hfq.py` | hfq 后复权回补 (2023-01 起, 26 分片) |
 | `backfill_st.py` | **逐日 ST 状态回补/增量/合并** (isST 字段, → st_history.parquet) |
 | `daily_update.py` | 每日快照增量 + 除权修复(fixup) + 指数快照; `load_store()` 统一读库 |
-| `signals.py` | 指标计算、动量选股、三套评分(momentum/quality/amihud)、大盘状态机 Z0-Z3 |
+| `signals.py` | 指标计算、动量选股、四套评分(momentum/quality/amihud/voladj)、大盘状态机 Z0-Z3 |
 | `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir)`; 止损-8%/持有10日/放量滞涨/Z0清仓 |
 | `run_daily.py` | 编排: 双口径回测 → data/meta(开) + data/meta_no(关); 关键步骤失败即中止 |
 | `build_report.py` | 静态报告: 双 payload 内嵌, 右上角"仓位控制 开/关"切换 |
@@ -84,7 +84,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 1. **趋势破位退出规则**: 删除。74 笔 -17.7 万, W/L 0.51, 纯负贡献
 2. **仓位状态机**: 开 +50.9%(修复后口径) vs 关 +43.7%; 若仅看旧口径 开+32.2% vs 关-78.4% —— 状态机是核心风控, 保留
 3. **状态机锚定**: 上证 (中证1000 锚定 A/B 不采纳)
-4. **评分因子**: quality 胜出 (关模式隔离组 +43.7% vs 纯动量 -78.3%, 最干净的隔离组); amihud 淘汰 (+5.0%, 且公式方向与"回避低流动"动机矛盾, 固定滑点下低流动回测虚高)
+4. **评分因子**: quality 胜出 (关模式隔离组 +43.7% vs 纯动量 -78.3%, 最干净的隔离组); amihud 淘汰 (+5.0%, 且公式方向与"回避低流动"动机矛盾, 固定滑点下低流动回测虚高); voladj 淘汰 (2026-09-08 下午, 调整后动量 = ret20/vol20 × 指数20日波动率 —— 秩上 ≡ ret20/vol20, 因指数波动率是日级常数不改变同日横截面排序; 实测 开+21.8%/-30.5%/夏普0.44, 关-36.8%/-53.6%, 全面劣于 quality)
 5. **Git LFS**: 否决。私库免费配额 1GB/月带宽比 git 本体更紧且同样只增不减; 稳态日增 0.2-0.5MB, 真超标走 GitHub Releases + filter-repo
 6. **指标增量计算/polars**: 否决。全量重算实测 ~25s, CI 90min 用 <5%; 重估触发: 扫描>3min 或股票池翻倍
 
