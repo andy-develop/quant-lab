@@ -263,7 +263,7 @@ STRAT_DOC = """
 <h3>六、数据源与已知局限</h3>
 <ul>
 <li>日线数据：baostock（含退市股）+ 腾讯行情增量更新；指数：上证指数日线；</li>
-<li>回测区间自 2023-09 起（信号所需的 120 日动量前置数据自 2023-01 回补，<b>窗口首日信号即有效</b>，不存在前期"假空仓"）；净值窗口提供 <b>近1年 / 近3年</b> 两档（右上角切换），近3年窗口从回测实际首日取数；</li>
+<li>回测区间自 2023-09 起（信号所需的 120 日动量前置数据自 2023-01 回补，<b>窗口首日信号即有效</b>，不存在前期"假空仓"）；区间选择条提供 近一周 ~ 近一年 及 <b>近三年</b>（回测全期）各档，默认近一年；</li>
 <li><b>可复现性</b>：信号基于后复权序列，历史值不随新除权事件改变；</li>
 <li><b>局限</b>：未建模盘中撮合排队（以开盘价全额成交近似）；滑点为固定比例，小市值极端行情可能更大；未含融资利息（纯现货）；信号日若开盘涨停则机会直接放弃，实盘可能以更高成本追入；历史回测表现不代表未来收益。</li>
 </ul>
@@ -330,10 +330,6 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
       <button class="mode-btn on" data-m="on" onclick="setMode('on')">仓位控制 开</button>
       <button class="mode-btn" data-m="off" onclick="setMode('off')">关 (满仓无择时)</button>
     </div>
-    <div class="mode-sw" id="winSw" style="margin-top:6px">
-      <button class="mode-btn on" data-w="y1" onclick="setWin('y1')">近1年</button>
-      <button class="mode-btn" data-w="y3" onclick="setWin('y3')">近3年</button>
-    </div>
     <div class="mode-note">大盘状态机 Z0–Z3 · 锚定上证</div>
   </div>
 </div>
@@ -345,6 +341,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
   <div class="tab" data-n="63">近三月</div>
   <div class="tab" data-n="122">近六月</div>
   <div class="tab on" data-n="244">近一年</div>
+  <div class="tab" data-w="y3">近三年</div>
 </div>
 <div class="kpis card"><h2>核心指标对比 <span class="note">(所选区间 · 沪深300为同期买入持有)</span></h2><table id="kpiTable"></table></div>
 
@@ -376,13 +373,12 @@ __STRAT_DOC__
 </div>
 <script>
 const MODES = __DATA__;
-let curWin = 'y1';         // 净值窗口: y1=近1年 / y3=近3年
+let curWin = 'y1';         // 净值窗口: y1=近1年 / y3=近3年 (由区间 tabs 驱动)
 let D = MODES[curWin].on;  // 默认: 近1年 · 开启仓位控制
 let curMode = 'on';
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
 const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
-let rangeN = 0;
 
 // ---------- 仓位控制模式切换 ----------
 const WARN_ON  = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
@@ -404,14 +400,6 @@ function setMode(m){
   renderAll();
 }
 
-// ---------- 净值窗口切换 (近1年/近3年) ----------
-function setWin(w){
-  if(!MODES[w] || w===curWin) return;
-  curWin = w; D = MODES[w][curMode];
-  document.querySelectorAll('#winSw .mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.w===w));
-  renderAll();
-}
-
 // ---------- 交易明细折叠 ----------
 let tradeOpen = false;
 function toggleTrade(){
@@ -420,12 +408,16 @@ function toggleTrade(){
   document.getElementById('tradeToggle').textContent = tradeOpen ? '收起明细 ▴' : '展开明细 ▾';
 }
 
-// ---------- 区间切换 ----------
+// ---------- 区间切换 (近一周~近一年在 y1 窗口内切片; 近三年切到 y3 窗口看全量) ----------
+let rangeN = 244;   // 默认近一年
 document.getElementById('rangeTabs').addEventListener('click', e => {
-  if(!e.target.dataset.n) return;
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
-  e.target.classList.add('on');
-  rangeN = +e.target.dataset.n;
+  const t = e.target;
+  if(!t.dataset.n && !t.dataset.w) return;
+  document.querySelectorAll('#rangeTabs .tab').forEach(x=>x.classList.remove('on'));
+  t.classList.add('on');
+  if(t.dataset.w){ curWin = t.dataset.w; rangeN = 0; }   // 近三年: y3 窗口全量
+  else           { curWin = 'y1';     rangeN = +t.dataset.n; }
+  D = MODES[curWin][curMode];
   renderAll();
 });
 
@@ -497,7 +489,7 @@ function drawEquity(){
     xAxis:{type:'category',data:sl.dates,axisLabel:{fontSize:10,color:'#88867E'}},
     yAxis:{type:'value',scale:true,axisLabel:{fontSize:10,color:'#88867E',formatter:nf}},
     series}, true);
-  document.getElementById('eqNote').textContent = `(${D.win_label}: ${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
+  document.getElementById('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
 }
 
 function drawReasons(tr){
@@ -573,7 +565,7 @@ function renderAll(){
 }
 
 document.getElementById('sub').textContent =
-  `生成于 ${D.generated} · 净值窗口 近1年/近3年可切换 (当前 ${D.win_label}: ${D.start_day} ~ ${D.last_day}) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
+  `生成于 ${D.generated} · 默认区间近一年, 可切近三年(回测全期) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('warnBar').innerHTML = WARN_ON;
 document.getElementById('foot').innerHTML = FOOT_ON;
 
