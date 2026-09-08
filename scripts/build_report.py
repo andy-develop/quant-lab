@@ -12,35 +12,41 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根�
 META, POOL = f"{BASE}/data/meta", f"{BASE}/data/pool"
 STRAT_CN = {"momentum": "动量轮动"}
 REASON_CN = {"stop_loss": "止损", "vol_shrink": "放量滞涨",
-             "expired": "持有到期", "quick_fail": "快速认错"}
+             "expired": "持有到期", "quick_fail": "快速认错", "market_exit": "逃顶清仓"}
 REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
                "vol_shrink": "成交量≥2×5日均量且收阴",
                "expired": "持有满 10 个交易日",
-               "quick_fail": "首日收盘浮亏超阈值"}
+               "quick_fail": "首日收盘浮亏超阈值",
+               "market_exit": "大盘触发 Z0 空仓信号, 全线清仓"}
 WINDOW_DAYS = 244        # 报告窗口: 近一年(交易日)
 
 
-def main():
-    eq = pd.read_csv(f"{META}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
+def _shared():
+    """跨模式共享: 基准序列 / 信号 / 股票名"""
     bench = pd.read_parquet(f"{META}/bench_daily.parquet").set_index("date")["close"]
-    bench = bench.reindex(eq.index).ffill()
     # 中证1000 基准 (缺失时退化为沪深300)
     p1000 = f"{META}/csi1000_daily.parquet"
     if os.path.exists(p1000):
         _c = pd.read_parquet(p1000)
         _c["date"] = pd.to_datetime(_c["date"])
-        bench1000 = _c.set_index("date")["close"].reindex(eq.index).ffill()
+        bench1000 = _c.set_index("date")["close"]
     else:
         bench1000 = bench
-    trades = pd.read_parquet(f"{META}/trades.parquet")
-    trades["entry_date"] = pd.to_datetime(trades["entry_date"])
-    trades["exit_date"] = pd.to_datetime(trades["exit_date"])
-    hold = pd.read_parquet(f"{META}/holdings.parquet")
-    hold["date"] = pd.to_datetime(hold["date"])
-    hold["entry_date"] = pd.to_datetime(hold["entry_date"])
     sigs = pd.read_parquet(f"{META}/signals.parquet")
     sigs["date"] = pd.to_datetime(sigs["date"])
-    basic = pd.read_parquet(f"{META}/stock_basic.parquet").set_index("secid")["name"]
+    return bench, bench1000, sigs
+
+
+def build_payload(meta_dir, mode, bench, bench1000, sigs):
+    eq = pd.read_csv(f"{meta_dir}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
+    bench = bench.reindex(eq.index).ffill()
+    bench1000 = bench1000.reindex(eq.index).ffill()
+    trades = pd.read_parquet(f"{meta_dir}/trades.parquet")
+    trades["entry_date"] = pd.to_datetime(trades["entry_date"])
+    trades["exit_date"] = pd.to_datetime(trades["exit_date"])
+    hold = pd.read_parquet(f"{meta_dir}/holdings.parquet")
+    hold["date"] = pd.to_datetime(hold["date"])
+    hold["entry_date"] = pd.to_datetime(hold["entry_date"])
 
     last_day = eq.index[-1]
     # ---- 报告窗口: 近一年 ----
@@ -63,7 +69,7 @@ def main():
     # ---- 下个交易日卖出计划: 收盘已挂单的持仓 ----
     sell_plan = []
     hold_last = hold[hold["date"] == last_day].set_index("code")
-    ps_file = f"{META}/pending_sells.parquet"
+    ps_file = f"{meta_dir}/pending_sells.parquet"
     if os.path.exists(ps_file):
         ps = pd.read_parquet(ps_file)
         for _, r in ps.iterrows():
@@ -118,7 +124,7 @@ def main():
     except Exception as e:
         print(f"[WARN] 卖出风险预警计算失败: {e}", flush=True)
 
-    # ---- 持仓合计 vs 目标仓位 ----
+    # ---- 持仓合计 ----
     hold_list = [
         {"code": r["code"][-6:], "name": r["name"], "strategy_cn": STRAT_CN[r["strategy"]],
          "entry_date": str(r["entry_date"].date()), "entry_px": float(r["entry_px"]),
@@ -130,7 +136,8 @@ def main():
     hold_ratio = hold_value / float(eq.iloc[-1]) if float(eq.iloc[-1]) > 0 else 0.0
 
     # ---- JSON 载荷 ----
-    payload = {
+    return {
+        "mode": mode,
         "generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
         "last_day": str(last_day.date()),
         "start_day": str(start_day.date()),
@@ -158,13 +165,24 @@ def main():
         "risk_list": risk_list,
     }
 
-    html = render_html(payload)
+
+def main():
+    bench, bench1000, sigs = _shared()
+    p_on = build_payload(META, "on", bench, bench1000, sigs)
+    off_dir = f"{BASE}/data/meta_no"
+    if os.path.exists(f"{off_dir}/equity.csv"):
+        p_off = build_payload(off_dir, "off", bench, bench1000, sigs)
+    else:
+        p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
+    modes = {"on": p_on, "off": p_off}
+
+    html = render_html(modes)
     os.makedirs(f"{BASE}/report", exist_ok=True)
     out = f"{BASE}/report/index.html"
     with open(out, "w") as f:
         f.write(html)
-    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB)", flush=True)
-    return payload
+    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 开:{len(p_on['trades'])}笔/关:{len(p_off['trades'])}笔)", flush=True)
+    return modes
 
 
 def render_html(P):
@@ -187,7 +205,7 @@ STRAT_DOC = """
 <div class="doc">
 
 <h3>一、策略总览</h3>
-<p>本系统为<b>纯日线量化选股系统</b>，运行于 A 股市场，目标持仓 5–10 个交易日，每日最多新开仓 3 只，始终满仓运行（最多同时持有 10 只，无大盘择时）。策略层与执行层完全分离：策略只在 T 日收盘后基于当日及历史数据产生信号，T+1 日开盘价执行，<b>任何信号均不使用未来数据</b>（已两次专项排查未来函数：信号对齐 T-1）。</p>
+<p>本系统为<b>纯日线量化选股系统</b>，运行于 A 股市场，目标持仓 5–10 个交易日，每日最多新开仓 3 只，支持两种仓位口径（<b>仓位状态机 / 始终满仓</b>，页面右上角一键切换，默认开启仓位控制）。策略层与执行层完全分离：策略只在 T 日收盘后基于当日及历史数据产生信号，T+1 日开盘价执行，<b>任何信号均不使用未来数据</b>（已两次专项排查未来函数：信号对齐 T-1）。</p>
 
 <h3>二、选股策略 · 动量轮动（momentum）</h3>
 <p>经典横截面动量策略，买强势股的惯性延续。同时满足以下全部条件才触发信号：</p>
@@ -201,12 +219,17 @@ STRAT_DOC = """
 </ul>
 <p><b>股票池过滤</b>：剔除 ST、*ST、退市整理期个股；北交所因数据源不支持天然不含。全池基于 baostock 日线（含退市股，规避幸存者偏差）。价格口径：信号与收益使用<b>后复权序列</b>（历史值永久冻结，任意日期重跑结果可复现），成交明细展示不复权真实价；流动性过滤使用<b>真实成交额</b>（非前复权近似）。</p>
 
-<h3>三、仓位管理（无大盘择时）</h3>
-<p>本策略<b>始终满仓运行</b>：最多同时持有 10 只、每日最多新开仓 3 只、单只预算 ≈ 总资金/10（整手买入）。不设大盘仓位状态机。</p>
-<p><b>已移除的规则 · 大盘仓位状态机（「买卖点」Z0–Z3，锚定上证指数）</b>：A/B 复核显示该状态机是回测中回撤控制的主要来源——保留时全期 +32.2%（夏普 0.49，回撤 -47.7%），完全移除后 -78.4%（2024 年 -72.1%），仅保留 Z0 逃顶清仓而无仓位预算也有 -59.5%。但状态机依赖指数均线的频繁状态切换、规则复杂度与实盘执行摩擦较高，经权衡后于 2026-09-07 移除，<b>代价是策略将裸露于系统性下跌（如 2024 年初微盘踩踏）</b>。若未来回撤不可接受，可参考 git 历史恢复（commit 4e32f55 及之前版本含完整状态机）。</p>
+<h3>三、仓位管理 · 双口径可切换（页面右上角按钮）</h3>
+<p>本策略提供两种仓位口径，页面右上角可<b>一键切换</b>，默认展示<b>开启仓位控制</b>的版本：</p>
+<ul>
+<li><b>仓位控制 开（默认）</b>：总仓位锚定上证指数「买卖点」状态机——Z0 空仓 0%（触发全线清仓）/ Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%（均线多头排列），同状态内阶梯回落（重仓破 10 日线降半仓、破 20 日线降轻仓）；每日最多新开仓 3 只。</li>
+<li><b>仓位控制 关</b>：始终满仓运行，最多同时持有 10 只、单只预算 ≈ 总资金/10（整手买入），无大盘择时。</li>
+</ul>
+<p><b>为什么默认开启</b>：A/B 对比（全期 2023-09 ~ 2026-09）——开：+32.2%，夏普 0.49，最大回撤 -47.7%；关：-78.4%，夏普 -1.01，最大回撤 -85.7%（2024 年单年 -72.1%）。状态机（含 Z0 逃顶清仓与阶梯仓位预算）是该策略在系统性下跌中唯一的保护：仅保留 Z0 逃顶而无仓位预算的中间版本也有 -59.5%，证明不是单一规则而是整套风控在起作用。关口径仅供对照「无择时的纯动量裸奔」形态，实盘不建议使用。</p>
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
+<li><b>逃顶清仓</b>（仅仓位控制开启时）：大盘触发 Z0 空仓条件，全部持仓无条件挂卖，最高优先级；</li>
 <li><b>止损</b>：收盘价 ≤ 买入价 × 0.92（-8%硬止损）；</li>
 <li><b>持有到期</b>：持有满 10 个交易日强制退出；</li>
 <li><b>放量滞涨</b>：持有 ≥ 2 日后，成交量 ≥ 2 × 前一日5日均量且当日收阴（主力出货嫌疑）。</li>
@@ -269,6 +292,12 @@ tr:hover td{background:#FAFAF7;}
 .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;}
 .fold-btn{float:right;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:3px 14px;font-size:12px;color:var(--muted);cursor:pointer;font-family:inherit;}
 .fold-btn:hover{color:var(--ink);border-color:var(--muted);}
+.hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}
+.mode-sw{display:flex;border:1px solid var(--line);border-radius:16px;overflow:hidden;flex-shrink:0;margin-top:2px;}
+.mode-btn{padding:6px 14px;font-size:12.5px;color:var(--muted);cursor:pointer;background:var(--card);border:0;font-family:inherit;white-space:nowrap;}
+.mode-btn.on{background:var(--ink);color:#fff;}
+.mode-btn:not(.on):hover{color:var(--ink);}
+.mode-note{font-size:11px;color:var(--muted);margin-top:3px;text-align:right;}
 .tg-a{background:#E6F1FB;color:#185FA5;} .tg-b{background:#E1F5EE;color:#0F6E56;} .tg-c{background:#EEEDFE;color:#534AB7;}
 .warn{background:#FAEEDA;border:1px solid #EF9F27;border-radius:10px;padding:10px 14px;font-size:12.5px;color:#633806;margin-bottom:14px;}
 footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
@@ -276,9 +305,20 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 </head>
 <body>
 <div class="wrap">
-<h1>A股短线策略实验室</h1>
-<div class="sub" id="sub"></div>
-<div class="warn" style="margin-top:14px">本报告回测覆盖<b>动量轮动</b>策略, 始终满仓运行(最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。</div>
+<div class="hdr">
+  <div>
+    <h1>A股短线策略实验室</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+  <div>
+    <div class="mode-sw" id="modeSw">
+      <button class="mode-btn on" data-m="on" onclick="setMode('on')">仓位控制 开</button>
+      <button class="mode-btn" data-m="off" onclick="setMode('off')">关 (满仓无择时)</button>
+    </div>
+    <div class="mode-note">大盘状态机 Z0–Z3 · 锚定上证</div>
+  </div>
+</div>
+<div class="warn" style="margin-top:14px" id="warnBar"></div>
 
 <div class="tabs" id="rangeTabs">
   <div class="tab" data-n="5">近一周</div>
@@ -316,11 +356,33 @@ __STRAT_DOC__
 <footer id="foot"></footer>
 </div>
 <script>
-const D = __DATA__;
+const MODES = __DATA__;
+let D = MODES.on;          // 默认: 开启仓位控制
+let curMode = 'on';
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
 const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
 let rangeN = 0;
+
+// ---------- 仓位控制模式切换 ----------
+const WARN_ON  = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
+const WARN_OFF = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制关闭</b>: 始终满仓运行 (最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。注意: 该口径在 2024 年初微盘踩踏中无任何系统性保护。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
+const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
+   仓位控制(开): 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
+   买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
+   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
+   仓位控制(关): 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
+   买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
+   策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+function setMode(m){
+  if(!MODES[m] || m===curMode) return;
+  curMode = m; D = MODES[m];
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  document.getElementById('warnBar').innerHTML = m==='on' ? WARN_ON : WARN_OFF;
+  document.getElementById('foot').innerHTML = m==='on' ? FOOT_ON : FOOT_OFF;
+  renderAll();
+}
 
 // ---------- 交易明细折叠 ----------
 let tradeOpen = false;
@@ -451,8 +513,10 @@ function tables(tr){
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>风险提示</th></tr></thead><tbody>`+
     (rl.map(r=>`<tr><td>${r.code}</td><td>${r.name}</td><td>${r.entry_date}</td><td>${r.hold_days}天</td><td class="${cls(r.pnl_pct)}">${fmtPct(r.pnl_pct)}</td><td>${r.risks.map(x=>'<span style="color:#633806">⚠</span> '+x).join('<br>')}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">当前无接近卖出条件的持仓</td></tr>')+'</tbody>';
-  const perStock = '单只 ≤ 10% 总资金 (整手买入, 最低1手)';
-  const buyCond = `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 最多同时持有 10 只`;
+  const perStock = curMode==='on' ? '单只 ≤ 10% 总资金, 且不超状态机目标仓位剩余预算' : '单只 ≤ 10% 总资金 (整手买入, 最低1手)';
+  const buyCond = curMode==='on'
+    ? `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 总仓位不超过状态机目标 (Z0 0%/Z1 30%/Z2 50%/Z3 100%)`
+    : `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 最多同时持有 10 只`;
   document.getElementById('planBuy').innerHTML =
     `<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>评分</th><th>建议仓位</th><th>买入条件</th></tr></thead><tbody>`+
     (D.pending.map(p=>`<tr><td>第${p.rank}名</td><td>${p.code}</td><td>${p.name}</td><td>${p.score.toFixed(3)}</td><td>${perStock}</td><td>${buyCond}</td></tr>`).join('')
@@ -482,11 +546,8 @@ function renderAll(){
 
 document.getElementById('sub').textContent =
   `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (近一年) · 初始资金 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
-document.getElementById('foot').innerHTML =
-  `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
-   仓位控制: 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
-   买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
-   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+document.getElementById('warnBar').innerHTML = WARN_ON;
+document.getElementById('foot').innerHTML = FOOT_ON;
 
 eqChart = echarts.init(document.getElementById('eqChart'));
 reasonChart = echarts.init(document.getElementById('reasonChart'));

@@ -6,6 +6,10 @@ data/meta/equity.csv
 data/meta/trades.parquet
 data/meta/holdings.parquet
 data/meta/pending_sells.parquet
+data/meta_no/equity.csv
+data/meta_no/trades.parquet
+data/meta_no/holdings.parquet
+data/meta_no/pending_sells.parquet
 data/meta/bs_progress_*.json
 data/meta/hfq_progress_*.json
 data/meta/backfill_progress.json

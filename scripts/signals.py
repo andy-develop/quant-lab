@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""信号层: 动量轮动策略 + 共享退出标志。全部基于 T 日收盘信息, T+1 执行。
+"""信号层: 动量轮动策略 + 共享退出标志 + 大盘仓位状态机。全部基于 T 日收盘信息, T+1 执行。
 
 价格口径: 信号指标全部基于【后复权 hfq】序列 (历史值永久冻结, 可复现;
 与 qfq 的区间收益一致, 但 qfq 随最新价整体缩放会破坏可复现性, 已弃用)。
@@ -7,11 +7,14 @@
 
 策略C momentum     动量轮动: 20日收益率横截面Top 5%, 多头排列
 
+大盘仓位状态机 (买卖点, 锚定上证指数):
+  Z0 空仓0%(清仓) / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%
+引擎侧按 use_regime 开关启用 (2026-09-08 起报告页支持一键切换双口径)。
+
 退出标志(T收盘判定, T+1开盘执行):
   shrink : 放量滞涨 vol>=2*vol_ma5[-1] 且 收阴
-引擎侧另有: 止损-8%、持有满10日。
-注: 趋势破位(破MA20)与大盘仓位状态机(Z0-Z3)均已于 2026-09-07 移除
-(趋势破位 A/B 证实纯负贡献; 状态机 A/B 显示删除后回测恶化, 为用户知悉数据后的决策)。
+引擎侧另有: 止损-8%、持有满10日、(开模式) Z0 逃顶清仓。
+注: 趋势破位(破MA20)已于 2026-09-07 移除 —— A/B 证实纯负贡献。
 """
 import glob, os
 import numpy as np
@@ -87,6 +90,59 @@ def build_indicators(hfq, raw):
     return df
 
 
+def market_regime(index_file=None, out_file=None):
+    """买卖点仓位状态机 -> 每日目标仓位比例 (默认锚定上证指数)
+    参考: 用户腾讯文档《买卖点》(docs.qq.com/doc/DWGdJeWR0amRjc3ZC)
+    Z0 空仓 / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%
+    注: 2026-09-07 A/B 复核 —— 状态机(含 Z0 逃顶与阶梯预算)是策略核心风控,
+    开启 +32.2%/夏普0.49/回撤-47.7%, 完全移除 -78.4%/夏普-1.01/-85.7%。
+    2026-09-08 起报告页支持一键切换开/关, 默认开启。
+    """
+    index_file = index_file or f"{BASE}/data/meta/index_daily.parquet"
+    out_file = out_file or f"{BASE}/data/meta/market_regime.parquet"
+    idx = pd.read_parquet(index_file).sort_values("date").reset_index(drop=True)
+    c = idx["close"]
+    ma5, ma10, ma20 = c.rolling(5).mean(), c.rolling(10).mean(), c.rolling(20).mean()
+    ma5p, ma10p = ma5.shift(1), ma10.shift(1)
+    ret = c.pct_change()
+    states = []
+    prev = "Z1"
+    for i in range(len(idx)):
+        if np.isnan(ma20.iloc[i]) or np.isnan(ma5p.iloc[i]):
+            states.append("Z1")
+            continue
+        # S0/S0-2 逃顶空仓
+        if (ma5.iloc[i] < ma10.iloc[i] and ma5.iloc[i] < ma20.iloc[i]) or \
+           (ma5.iloc[i] < ma20.iloc[i] and ret.iloc[i] < -0.01):
+            cur = "Z0"
+        # B3 重仓: 均线多头排列
+        elif c.iloc[i] > ma5.iloc[i] > ma10.iloc[i] > ma20.iloc[i]:
+            cur = "Z3"
+        # B2 半仓: 有效站上20日线
+        elif c.iloc[i] > ma20.iloc[i]:
+            cur = "Z2"
+        # B1/B1-1 抄底回补: 5MA/10MA 同时拐头向上
+        elif ma5.iloc[i] > ma5p.iloc[i] and ma10.iloc[i] > ma10p.iloc[i]:
+            cur = "Z1"
+        else:
+            # S2 重仓破10日线 -> 半仓; S1 破20日线 -> 轻仓; 其余维持
+            if prev == "Z3" and c.iloc[i] < ma10.iloc[i]:
+                cur = "Z2"
+            elif prev in ("Z2", "Z3") and c.iloc[i] < ma20.iloc[i]:
+                cur = "Z1"
+            else:
+                cur = prev
+        states.append(cur)
+        prev = cur
+    out = pd.DataFrame({"date": pd.to_datetime(idx["date"]), "state": states})
+    out["target_ratio"] = out["state"].map({"Z0": 0.0, "Z1": 0.3, "Z2": 0.5, "Z3": 1.0})
+    out.to_parquet(out_file, index=False)
+    dist = out["state"].value_counts().to_dict()
+    print(f"大盘状态机({out_file.split('/')[-1]}): {dist}  "
+          f"(最新 {out['date'].iloc[-1]:%Y-%m-%d} = {out['state'].iloc[-1]})", flush=True)
+    return out
+
+
 def signal_momentum(df):
     m1 = df["ret20"].groupby(level=1).rank(pct=True) >= 0.95    # 横截面Top5%
     m2 = (df["close"] > df["ma20"]) & (df["ma20"] > df["ma60"]) & df["ma60_rising"]
@@ -122,6 +178,7 @@ def run_scan():
     df = df[df.index.get_level_values(1) >= pd.Timestamp(START)]
     print("指标计算完成", flush=True)
 
+    market_regime()
     sig_c, score_c = signal_momentum(df)
     shrink = exit_flags(df)
 

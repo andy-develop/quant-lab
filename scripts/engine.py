@@ -9,9 +9,15 @@
   - T+1: 买入次日不可卖(引擎天然满足: 卖出信号在收盘判定, 最早次日开盘执行)
 会计口径: 后复权价格(hfq, 连续且历史值永久冻结)做信号/涨跌停判定/估值/现金流;
 交易流水展示不复权价。hfq 与 qfq 的区间收益率完全一致(复权因子在比值中约掉)。
-注: 大盘仓位状态机(Z0-Z3)已于 2026-09-07 按用户决策移除。
-A/B 数据(供回溯): 保留状态机 +32.2%/夏普0.49/回撤-47.7%; 完全移除 -78.4%/夏普-1.01
-(2024年 -72.1%); 仅保留Z0逃顶无预算 -59.5%。删除是用户在知悉数据后的明确选择。
+预算控制: 持仓市值实时按最近收盘价重算(不维护增量记账, 避免已实现盈亏泄漏)。
+
+双模式 (2026-09-08): use_regime 参数切换
+  True  = 大盘仓位状态机 (Z0空仓0%且清仓 / Z1轻仓30% / Z2半仓50% / Z3重仓100%,
+          锚定上证指数买卖点, 见 signals.market_regime) —— 报告默认展示
+  False = 始终满仓, 无大盘择时
+A/B 参考(全期2023-09~2026-09): 开 +32.2%/夏普0.49/回撤-47.7%; 关 -78.4%/夏普-1.01/-85.7%。
+注: 趋势破位(破MA20)退出规则已于 2026-09-07 移除 —— A/B 证实纯负贡献
+(74笔合计-17.7万, 删除后全期 +22.5% -> +32.2%, 夏普 0.39 -> 0.49)。
 """
 import os
 
@@ -65,12 +71,14 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None):
+def run_backtest(start=None, use_regime=True, out_dir=None):
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
     cal = cal[cal >= pd.Timestamp(start)] if start else cal
     start = start or str(cal[0].date())
+    out_dir = out_dir or f"{BASE}/data/meta"
+    os.makedirs(out_dir, exist_ok=True)
 
     qo, qc = piv["open"], piv["close"]        # hfq 口径 (连续, 涨跌停判定/成交/估值)
     ro, rc = piv["raw_open"], piv["raw_close"]  # 不复权 (展示价)
@@ -84,6 +92,14 @@ def run_backtest(start=None):
     no_buy = open_ret >= (pct_frame - 0.002)          # 开盘涨停/接近一字 -> 买不进
     no_sell = open_ret <= -(pct_frame - 0.002)        # 开盘跌停 -> 卖不出
 
+    # 大盘仓位状态机 (use_regime=False 时不启用, 始终满仓)
+    # 关键: 状态由 T 日收盘计算, T 日开盘不可见 -> 必须平移一日, 用 T-1 收盘状态驱动 T 日开盘动作 (防未来函数)
+    regime = None
+    if use_regime:
+        _reg = pd.read_parquet(f"{BASE}/data/meta/market_regime.parquet")
+        _reg["date"] = pd.to_datetime(_reg["date"])
+        regime = _reg.set_index("date")["target_ratio"].shift(1)
+
     cash = START_CAP
     positions = {}   # code -> dict
     trades, holdings_daily = [], []
@@ -92,6 +108,20 @@ def run_backtest(start=None):
     cal_pos = {d: i for i, d in enumerate(cal)}
 
     for day in cal:
+        ratio = 1.0
+        if use_regime:
+            if day in regime.index:
+                ratio = float(regime.at[day])
+            else:
+                ratio = float(regime.asof(day)) if len(regime) else 1.0
+            max_invest = (equity[-1][1] if equity else START_CAP) * ratio
+
+            # ---------- 逃顶: Z0 空仓 -> 全部挂卖出 ----------
+            if ratio <= 0.0:
+                for code in positions:
+                    if code not in pending_sells:
+                        pending_sells[code] = "market_exit"
+
         # ---------- 开盘: 先卖后买 ----------
         for code in list(pending_sells):
             reason = pending_sells[code]
@@ -118,10 +148,15 @@ def run_backtest(start=None):
             del pending_sells[code]
 
         # 买入: 【前一交易日收盘】的信号 -> 今日开盘执行 (防未来函数)
-        # 仓位: 每日最多 MAX_BUY_PER_DAY 只, 等权 slot = 总权益/MAX_POS (受可用现金约束)
+        # 开模式: 持仓市值 mv 实时按最近收盘价重算, 不得超过 max_invest (状态机目标仓位)
         prev_day = cal[cal_pos[day] - 1] if cal_pos[day] > 0 else None
+        mv = 0.0
+        if use_regime:
+            for pos_ in positions.values():
+                cl_ = pos_.get("last_close", np.nan)
+                mv += pos_["shares"] * (cl_ if not np.isnan(cl_) else pos_["entry_adj"])
         cands = []
-        if prev_day is not None:
+        if prev_day is not None and ratio >= 0.001:
             for strat, sw in sig_w.items():
                 if prev_day in sw.index:
                     row = sw.loc[prev_day].dropna()
@@ -134,6 +169,8 @@ def run_backtest(start=None):
         for rank_c, (sc, strat, code) in enumerate(cands, 1):
             if free <= 0 or n_try >= MAX_BUY_PER_DAY:
                 break
+            if use_regime and mv >= max_invest - 1000:   # 预算用尽 (1000元容差)
+                break
             if code in held:
                 continue
             px = qo.at[day, code] if code in qo.columns else np.nan
@@ -143,12 +180,16 @@ def run_backtest(start=None):
                 continue                      # 开盘涨停买不进
             slot = min(equity[-1][1] / MAX_POS if equity else START_CAP / MAX_POS,
                        cash / max(free, 1))
+            if use_regime:
+                slot = min(slot, max_invest - mv)    # 不超目标仓位预算
             shares = int(slot / (px * 100)) * 100
             if shares < 100:
                 continue
             cost = shares * px * (1 + SLIP)
             fee = buy_fee(cost)
             cash -= cost + fee
+            if use_regime:
+                mv += cost + fee
             n_try += 1
             positions[code] = {
                 "name": names.get(code, code), "strategy": strat,
@@ -197,19 +238,19 @@ def run_backtest(start=None):
     eq = pd.DataFrame(equity, columns=["date", "equity"]).set_index("date")
     tr = pd.DataFrame(trades)
     hd = pd.DataFrame(holdings_daily)
-    eq.to_csv(f"{BASE}/data/meta/equity.csv")
+    eq.to_csv(f"{out_dir}/equity.csv")
     # 待卖清单: 最后交易日收盘时已挂卖出、将于下一开盘执行的持仓
     pd.DataFrame([{"code": c, "reason": r} for c, r in pending_sells.items()],
                  columns=["code", "reason"]) \
-        .to_parquet(f"{BASE}/data/meta/pending_sells.parquet", index=False)
+        .to_parquet(f"{out_dir}/pending_sells.parquet", index=False)
     if len(tr):
-        tr.to_parquet(f"{BASE}/data/meta/trades.parquet", index=False)
+        tr.to_parquet(f"{out_dir}/trades.parquet", index=False)
         print(f"交易 {len(tr)} 笔, 胜率 {(tr['pnl_pct']>0).mean():.1%}, "
               f"总收益 {eq['equity'].iloc[-1]/START_CAP-1:+.1%}", flush=True)
     else:
         print("无交易", flush=True)
     if len(hd):
-        hd.to_parquet(f"{BASE}/data/meta/holdings.parquet", index=False)
+        hd.to_parquet(f"{out_dir}/holdings.parquet", index=False)
     return eq, tr, hd
 
 
