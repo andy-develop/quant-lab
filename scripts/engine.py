@@ -76,7 +76,7 @@ def load_signals_wide() -> tuple[dict[str, pd.DataFrame], pd.Series]:
 
 
 def run_backtest(start: str | None = None, use_regime: bool = True,
-                 out_dir: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                 out_dir: str | None = None, max_hold: int = MAX_HOLD) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -225,7 +225,7 @@ def run_backtest(start: str | None = None, use_regime: bool = True,
             reason = None
             if not np.isnan(cl) and cl <= pos["entry_adj"] * STOP_PCT:
                 reason = "stop_loss"
-            elif pos["hold_days"] >= MAX_HOLD:
+            elif pos["hold_days"] >= max_hold:
                 reason = "expired"
             elif pos["hold_days"] >= MIN_HOLD_SHRINK:
                 sv = piv["shrink"].at[day, code] if code in piv["shrink"].columns else False
