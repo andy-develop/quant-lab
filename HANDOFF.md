@@ -1,6 +1,6 @@
 # HANDOFF.md — quant-lab A股短线选股系统 · 交接文档
 
-> 最后更新: 2026-09-08 · 当前 HEAD: `814f4f3` (main, 已推送 GitHub)
+> 最后更新: 2026-09-08 · 当前 HEAD: `7315a72` (main, 已推送 GitHub)
 > 项目: 日选约 10 支、持仓 5–10 天的 A 股动量策略, 全自动每日更新 + 静态网页报告
 
 ---
@@ -32,7 +32,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 | `backfill_st.py` | **逐日 ST 状态回补/增量/合并** (isST 字段, → st_history.parquet) |
 | `daily_update.py` | 每日快照增量 + 除权修复(fixup) + 指数快照; `load_store()` 统一读库 |
 | `signals.py` | 指标计算、动量选股、八套评分(momentum/quality/quality_kdj5/kdj10/amihud/voladj/kdj/kdj_rev)、大盘状态机 Z0-Z3 |
-| `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir)`; 止损-8%/持有10日/放量滞涨/Z0清仓 |
+| `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir, max_hold)`; 止损-8%/持有max_hold日/放量滞涨/Z0清仓 |
 | `run_daily.py` | 编排: 双口径回测 → data/meta(开) + data/meta_no(关); 关键步骤失败即中止 |
 | `build_report.py` | 静态报告: 双 payload 内嵌, 右上角"仓位控制 开/关"切换 |
 | `trim_data.py` | 数据滚动清理 |
@@ -54,12 +54,18 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 - 开: 上证"买卖点"状态机 Z0空0%/Z1轻30%/Z2半50%/Z3重100%, 每日最多新开 3 只
 - 关: 满仓, 最多 10 只, 单只预算≈总资金/10
 
-**全窗口回测 (2023-09 ~ 2026-09, 初始 100 万)**:
+<!-- AUTO-KPI:START (refresh_docs.py 生成, 严禁手改) -->
+**全窗口回测 (2023-09-01 ~ 2026-09-07, 初始 100 万, `SCORE_MODE=quality_kdj5`)**:
 
 | 口径 | 收益 | 最大回撤 | 夏普 | 交易 | 胜率 |
 |---|---|---|---|---|---|
-| 开 (默认) | +31.8% | **-20.8%** | 0.61 | 460 | 39.1% |
-| 关 | +43.7% | -38.2% | 0.57 | 845 | 42.0% |
+| 开 (默认) | +115.3% | **-13.1%** | 1.45 | 460 | 42.2% |
+| 关 | +53.6% | **-37.3%** | 0.62 | 848 | 41.4% |
+<!-- AUTO-KPI:END -->
+
+> 数字由 `scripts/refresh_docs.py` 从 data/meta{,_no} 自动生成, 严禁手改; 夏普口径 √244 与报告前端一致。
+
+⚠️ 口径演变警示: 评分切到 quality_kdj5 (2026-09-08 晚) 后主表格数字整体上移, 此前文档中出现的 开+31.8%/关+43.7% (quality 基线) 与 开+32.2%/关-78.4% (纯动量+ST修复前) 均为**历史口径**, 勿与当前数据混用。
 
 ## 4. 已完成里程碑 (时间线)
 
@@ -82,7 +88,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 ## 5. 关键 A/B 决策记录 (防翻案, 均有数据)
 
 1. **趋势破位退出规则**: 删除。74 笔 -17.7 万, W/L 0.51, 纯负贡献
-2. **仓位状态机**: 开 +50.9%(修复后口径) vs 关 +43.7%; 若仅看旧口径 开+32.2% vs 关-78.4% —— 状态机是核心风控, 保留
+2. **仓位状态机** (结论随评分口径演进, 以最新口径为准): `quality_kdj5` 口径下重做 A/B —— 开 +115.3%/-13.1%/夏普1.47 **四维全优于** 关 +53.6%/-37.3%/0.63, 状态机从"核心风控"升级为"收益放大器" (机制见第 8 条: Z0 清仓/降仓释放 slot, 让更高评分新信号进场, slot 周转本身正贡献)。历史口径仅供追溯: quality 基线 开+50.9% vs 关+43.7% (风控价值=用收益换回撤); 纯动量 开+32.2% vs 关-78.4% (状态机是唯一风控)。
 3. **状态机锚定**: 上证 (中证1000 锚定 A/B 不采纳)
 4. **评分因子**: quality 胜出 (关模式隔离组 +43.7% vs 纯动量 -78.3%, 最干净的隔离组); amihud 淘汰 (+5.0%, 且公式方向与"回避低流动"动机矛盾, 固定滑点下低流动回测虚高); voladj 淘汰 (2026-09-08 下午, 调整后动量 = ret20/vol20 × 指数20日波动率 —— 秩上 ≡ ret20/vol20, 因指数波动率是日级常数不改变同日横截面排序; 实测 开+21.8%/-30.5%/夏普0.44, 关-36.8%/-53.6%, 全面劣于 quality); kdj 淘汰 (2026-09-08 傍晚, KDJ均值偏离 = 20日均J - 信号日J: 低吸方向 开+26.5%/-37.0%/夏普0.49 关-36.2%; 反向 kdj_rev 追涨方向 开-51.4% 关-94.5% 灾难性 —— 方向性极强说明 J 偏离有信息但单因子弱于 quality 合成)
 7. **quality+kdj 混合评分** (2026-09-08 晚, **已采纳为默认**): kdj 以微权重并入 quality —— quality_kdj5 (0.30动量/0.25夏普/0.20胜率/0.15趋势/0.05低波动/0.05kdj) 与 quality_kdj10 (五因子×0.9 + 0.10kdj)。开模式: kdj5 **+115.3%/-13.1%/夏普1.45**, kdj10 +91.6%/-16.7%/1.28, 基线 quality +31.8%/-20.8%/0.60; 关模式: kdj10 +94.2% 最强, kdj5 +53.6%, 基线 +43.7%。分时段稳健性: 开模式下 kdj5 在 前半(+18.1% vs +2.2%)/后半(+82.9% vs +32.0%)/2024(+3.0% vs -7.1%)/2025(+57.4% vs +19.8%) **全部子区间跑赢基线**, 非单段行情; 信号数不变(87,274), 仅同日买入排序变化。采纳时的反方观点(已记录, 待样本外复核): 微权重撬动 3.6 倍收益差说明买入优先级对 slot 竞争极其敏感, 存在排序路径依赖过拟合风险, 且 kdj5 关模式前半(2024)曾跑输隔离组; 回滚 = SCORE_MODE 改回 "quality"。
@@ -101,7 +107,8 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 ## 7. 运维要点
 
 - **手动触发**: `gh workflow run daily.yml --ref main`; 监控 `gh run watch <run_id> --repo andy-develop/quant-lab`
-- **推送绕代理**: `git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 push origin main` (本机代理对 github.com CONNECT 502)
+- **文档口径刷新** (改 SCORE_MODE / MAX_HOLD / 回测数据后必跑): `python scripts/refresh_docs.py` 自动更新 HANDOFF 主表格 + 校验文档与代码一致 (`--check-only` 只校验); build_report.main() 开头也内置同一校验, 不一致直接 fail CI
+- **推送绕代理**: `git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 push origin main` (本机代理对 github.com CONNECT 502; 失败时可用 api.github.com 兜底, 参见 quant-lab-ml 的 scripts/api_push.py)
 - **数据校验**: `python skills/quant-lab-data/scripts/verify_store.py` (只读, 查重复/对齐/缺口)
 - **多日数据缺口**: 走 fixup 整段重拉 (见 quant-lab-data skill 第 4 节), daily_update 一次只补一天
 - **报告未更新排查**: CI 日志 grep "评分模式" / "总收益" / "上传"; 线上 curl https://kpqv8z.gicp.fun 确认

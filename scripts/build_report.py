@@ -5,17 +5,23 @@
 import json
 import glob
 import os
+import sys
 import numpy as np
 import pandas as pd
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根目录(本地/CI通用)
 META, POOL = f"{BASE}/data/meta", f"{BASE}/data/pool"
+sys.path.insert(0, f"{BASE}/scripts")
+import engine                                    # noqa: E402  (MAX_HOLD 权威来源)
+from refresh_docs import compute_kpis, check_doc_consistency, DOC_SCORE_MODE  # noqa: E402
+
+MAX_HOLD = engine.MAX_HOLD                       # 文案随引擎参数化, 杜绝 "满10日" 硬编码撒谎
 STRAT_CN = {"momentum": "动量轮动"}
 REASON_CN = {"stop_loss": "止损", "vol_shrink": "放量滞涨",
              "expired": "持有到期", "quick_fail": "快速认错", "market_exit": "逃顶清仓"}
 REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
                "vol_shrink": "成交量≥2×5日均量且收阴",
-               "expired": "持有满 10 个交易日",
+               "expired": f"持有满 {MAX_HOLD} 个交易日",
                "quick_fail": "首日收盘浮亏超阈值",
                "market_exit": "大盘触发 Z0 空仓信号, 全线清仓"}
 # 净值窗口: 近1年/近3年两档 (去年同期自然日起, 起点净值归一 100 万), 见 main()
@@ -117,10 +123,10 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
                         drop = 1 - 0.92 / ratio          # 再跌多少触发 -8% 硬止损
                         if 0 <= drop <= 0.02:
                             risks.append(f"再跌 {drop:.1%} 触发硬止损(-8%)")
-                if h["hold_days"] == 9:
-                    risks.append("下个交易日满 10 日, 强制持有到期退出")
-                elif h["hold_days"] == 8:
-                    risks.append("2 个交易日后满 10 日强制退出")
+                if h["hold_days"] == MAX_HOLD - 1:
+                    risks.append(f"下个交易日满 {MAX_HOLD} 日, 强制持有到期退出")
+                elif h["hold_days"] == MAX_HOLD - 2:
+                    risks.append(f"2 个交易日后满 {MAX_HOLD} 日强制退出")
                 if risks:
                     risk_list.append({
                         "code": code[-6:], "name": h["name"],
@@ -174,6 +180,8 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
 
 
 def main():
+    # ---- 口径一致性门禁: 评分模式/持有期与文档声明不符时直接失败 (CI fatal) ----
+    check_doc_consistency()
     bench, bench1000, sigs = _shared()
     off_dir = f"{BASE}/data/meta_no"
     has_off = os.path.exists(f"{off_dir}/equity.csv")
@@ -200,11 +208,30 @@ def main():
     return modes
 
 
+def _kpi_block_html() -> str:
+    """报告内的全期 A/B 数据块 (数字来自 refresh_docs.compute_kpis, 自动生成)。"""
+    k = compute_kpis()
+
+    def row(label, m):
+        return (f"<tr><td>{label}</td><td class=\"{'up' if m['ret']>=0 else 'down'}\"><b>{m['ret']:+.1%}</b></td>"
+                f"<td>{m['maxdd']:.1%}</td><td>{m['sharpe']:.2f}</td>"
+                f"<td>{m['trades']}</td><td>{m['winrate']:.1%}</td></tr>")
+
+    return (f"<table><tr><th>口径</th><th>收益</th><th>最大回撤</th><th>夏普</th><th>交易</th><th>胜率</th></tr>"
+            f"{row('开 (默认)', k['on'])}{row('关', k['off'])}</table>"
+            f"<p class=\"note\">数据区间 {k['on']['start']} ~ {k['on']['end']} · 由 refresh_docs.py 自动生成 · "
+            f"评分模式 {DOC_SCORE_MODE} · 夏普口径 √244</p>")
+
+
 def render_html(P):
     data_json = json.dumps(P, ensure_ascii=False)
+    doc = (STRAT_DOC
+           .replace("__MAX_HOLD__", str(MAX_HOLD))
+           .replace("__KPI_BLOCK__", _kpi_block_html()))
     return (HTML_TEMPLATE
             .replace("__DATA__", data_json)
-            .replace("__STRAT_DOC__", STRAT_DOC))
+            .replace("__STRAT_DOC__", doc)
+            .replace("__MAX_HOLD__", str(MAX_HOLD)))
 
 
 STRAT_DOC = """
@@ -230,7 +257,7 @@ STRAT_DOC = """
 <li>排除极端妖股：20 日收益 &lt; 60%（避免追在鱼尾行情顶部）；</li>
 <li>长期背景：近 120 日收益为正；</li>
 <li>流动性过滤：20 日日均成交额 ≥ 3000 万元；</li>
-<li>评分（买入优先级）：<b>趋势质量合成评分</b>——各因子按日横截面排名分位加权：20日动量 30% + 20日夏普 25% + 60日上涨胜率 20% + 均线多头连续天数 15% + 低波动 10%。同日多信号按评分从高到低依次买入（2026-09-08 A/B 上线：关模式隔离组 +43.7% vs 纯动量 -78.3%，开模式最大回撤 -45.9%→-20.8%）。</li>
+<li>评分（买入优先级）：<b>趋势质量合成评分 + KDJ 微权重</b>（<code>SCORE_MODE="quality_kdj5"</code>）——各因子按日横截面排名分位加权：20日动量 30% + 20日夏普 25% + 60日上涨胜率 20% + 均线多头连续天数 15% + 低波动 5% + KDJ偏离 5%（20日均J − 信号日J，低吸方向）。同日多信号按评分从高到低依次买入（只影响买入顺序/名额竞争，不改选股条件；2026-09-08 A/B 台账见 HANDOFF 第 5 节，回滚改 SCORE_MODE 一行）。</li>
 </ul>
 <p><b>股票池过滤</b>：按<b>信号日当天的 ST 状态</b>剔除 ST、*ST 个股（baostock 逐日 isST 历史，2026-09-08 修复了原先用"当前名称"过滤全历史的未来函数——戴帽前的健康期被误删、摘帽股被误留；修复后 A/B：开模式 +32.2%→+50.9%，回撤 -47.7%→-45.9%）；当前处于退市整理期的个股整段剔除；北交所因数据源不支持天然不含。全池基于 baostock 日线（含退市股，规避幸存者偏差）。价格口径：信号与收益使用<b>后复权序列</b>（历史值永久冻结，任意日期重跑结果可复现），成交明细展示不复权真实价；流动性过滤使用<b>真实成交额</b>（非前复权近似）。</p>
 
@@ -240,13 +267,14 @@ STRAT_DOC = """
 <li><b>仓位控制 开（默认）</b>：总仓位锚定上证指数「买卖点」状态机——Z0 空仓 0%（触发全线清仓）/ Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%（均线多头排列），同状态内阶梯回落（重仓破 10 日线降半仓、破 20 日线降轻仓）；每日最多新开仓 3 只。</li>
 <li><b>仓位控制 关</b>：始终满仓运行，最多同时持有 10 只、单只预算 ≈ 总资金/10（整手买入），无大盘择时。</li>
 </ul>
-<p><b>为什么默认开启</b>：A/B 对比（全期 2023-09 ~ 2026-09）——开：+32.2%，夏普 0.49，最大回撤 -47.7%；关：-78.4%，夏普 -1.01，最大回撤 -85.7%（2024 年单年 -72.1%）。状态机（含 Z0 逃顶清仓与阶梯仓位预算）是该策略在系统性下跌中唯一的保护：仅保留 Z0 逃顶而无仓位预算的中间版本也有 -59.5%，证明不是单一规则而是整套风控在起作用。关口径仅供对照「无择时的纯动量裸奔」形态，实盘不建议使用。</p>
+<p><b>为什么默认开启</b>（当前口径 <code>quality_kdj5</code>，全期 A/B 见下方数据）：开模式在<b>收益、夏普、回撤、胜率四个维度全部占优</b>——收益约为关口径 2.2 倍、回撤仅其 1/3。机制（HANDOFF 台账第 8 条）：状态机的 Z0 清仓/降仓会释放持仓 slot，让更高评分的新信号及时进场，slot 周转本身产生正贡献；此外 2024 年初式系统性下跌中状态机仍提供尾部保护（纯动量评分时代关口径曾 -78.4%，彼时状态机是唯一风控）。历史口径数字随评分/ST 修复演进，最新数字以本节数据块与 HANDOFF 为准（自动生成，杜绝手写陈旧）。</p>
+__KPI_BLOCK__
 
 <h3>四、卖出规则（优先级从高到低）</h3>
 <ul>
 <li><b>逃顶清仓</b>（仅仓位控制开启时）：大盘触发 Z0 空仓条件，全部持仓无条件挂卖，最高优先级；</li>
 <li><b>止损</b>：收盘价 ≤ 买入价 × 0.92（-8%硬止损）；</li>
-<li><b>持有到期</b>：持有满 10 个交易日强制退出；</li>
+<li><b>持有到期</b>：持有满 __MAX_HOLD__ 个交易日强制退出；</li>
 <li><b>放量滞涨</b>：持有 ≥ 2 日后，成交量 ≥ 2 × 前一日5日均量且当日收阴（主力出货嫌疑）。</li>
 </ul>
 <p><b>已移除的规则 · 趋势破位（收盘跌破 MA20）</b>：A/B 复核证实其为纯负贡献——74 笔交易合计约 -17.7 万（平均盈利 +3.6% / 平均亏损 -5.4%），胜率仅 16%，本质是在止损和到期之外把浮盈中的强势股提前砍掉、系统性切断右尾收益。删除后全期收益 +22.5% → +32.2%，夏普 0.39 → 0.49，最大回撤基本不变，故移除。</p>
@@ -383,11 +411,11 @@ const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
 // ---------- 仓位控制模式切换 ----------
 const WARN_ON  = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
 const WARN_OFF = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制关闭</b>: 始终满仓运行 (最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。注意: 该口径在 2024 年初微盘踩踏中无任何系统性保护。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
-const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
+const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满__MAX_HOLD__日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
    仓位控制(开): 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
    策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。净值窗口: 近1年/近3年两档(右上角切换, 自然日起算), 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
-const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
+const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满__MAX_HOLD__日退出; 无大盘择时, 始终满仓。<br>
    仓位控制(关): 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
    策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。净值窗口: 近1年/近3年两档(右上角切换, 自然日起算), 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
