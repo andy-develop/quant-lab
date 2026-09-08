@@ -18,7 +18,7 @@ REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
                "expired": "持有满 10 个交易日",
                "quick_fail": "首日收盘浮亏超阈值",
                "market_exit": "大盘触发 Z0 空仓信号, 全线清仓"}
-WINDOW_YEARS = 1         # 报告窗口: 去年同期(自然日)起, 起点净值归一 100 万
+# 净值窗口: 近1年/近3年两档 (去年同期自然日起, 起点净值归一 100 万), 见 main()
 
 
 def _shared():
@@ -37,7 +37,7 @@ def _shared():
     return bench, bench1000, sigs
 
 
-def build_payload(meta_dir, mode, bench, bench1000, sigs):
+def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
     eq = pd.read_csv(f"{meta_dir}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
     bench = bench.reindex(eq.index).ffill()
     bench1000 = bench1000.reindex(eq.index).ffill()
@@ -50,7 +50,9 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs):
 
     last_day = eq.index[-1]
     # ---- 报告窗口: 去年同期(自然日)起, 如今天 2026-09-08 -> 2025-09-08 ----
-    win_start = last_day - pd.DateOffset(years=WINDOW_YEARS)
+    win_start = last_day - pd.DateOffset(years=window_years)
+    # 回测起点 2023-09-01: 近3年窗口可能超出回测范围, 落到实际可用首日
+    win_start = max(win_start, eq.index[0])
     if eq.index[0] < win_start:
         eq = eq[eq.index >= win_start]
         bench = bench.reindex(eq.index).ffill()
@@ -142,6 +144,7 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs):
     # ---- JSON 载荷 ----
     return {
         "mode": mode,
+        "win_label": f"近{window_years}年",
         "generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
         "last_day": str(last_day.date()),
         "start_day": str(start_day.date()),
@@ -172,20 +175,28 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs):
 
 def main():
     bench, bench1000, sigs = _shared()
-    p_on = build_payload(META, "on", bench, bench1000, sigs)
     off_dir = f"{BASE}/data/meta_no"
-    if os.path.exists(f"{off_dir}/equity.csv"):
-        p_off = build_payload(off_dir, "off", bench, bench1000, sigs)
-    else:
-        p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
-    modes = {"on": p_on, "off": p_off}
+    has_off = os.path.exists(f"{off_dir}/equity.csv")
+    # 双净值窗口 × 双仓位口径: MODES[y1/y3][on/off], 前端两组按钮正交切换
+    windows = (("y1", 1), ("y3", 3))
+    modes = {}
+    for wname, wy in windows:
+        p_on = build_payload(META, "on", bench, bench1000, sigs, window_years=wy)
+        if has_off:
+            p_off = build_payload(off_dir, "off", bench, bench1000, sigs, window_years=wy)
+        else:
+            p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
+        modes[wname] = {"on": p_on, "off": p_off}
 
     html = render_html(modes)
     os.makedirs(f"{BASE}/report", exist_ok=True)
     out = f"{BASE}/report/index.html"
     with open(out, "w") as f:
         f.write(html)
-    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 开:{len(p_on['trades'])}笔/关:{len(p_off['trades'])}笔)", flush=True)
+    n_on = len(modes["y1"]["on"]["trades"])
+    n_off = len(modes["y1"]["off"]["trades"])
+    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 近1年 开:{n_on}笔/关:{n_off}笔; 近3年 "
+          f"开:{len(modes['y3']['on']['trades'])}笔/关:{len(modes['y3']['off']['trades'])}笔)", flush=True)
     return modes
 
 
@@ -252,7 +263,7 @@ STRAT_DOC = """
 <h3>六、数据源与已知局限</h3>
 <ul>
 <li>日线数据：baostock（含退市股）+ 腾讯行情增量更新；指数：上证指数日线；</li>
-<li>回测区间自 2023-09 起（信号所需的 120 日动量前置数据自 2023-01 回补，<b>窗口首日信号即有效</b>，不存在前期"假空仓"）；网页展示窗口默认近一年；</li>
+<li>回测区间自 2023-09 起（信号所需的 120 日动量前置数据自 2023-01 回补，<b>窗口首日信号即有效</b>，不存在前期"假空仓"）；净值窗口提供 <b>近1年 / 近3年</b> 两档（右上角切换），近3年窗口从回测实际首日取数；</li>
 <li><b>可复现性</b>：信号基于后复权序列，历史值不随新除权事件改变；</li>
 <li><b>局限</b>：未建模盘中撮合排队（以开盘价全额成交近似）；滑点为固定比例，小市值极端行情可能更大；未含融资利息（纯现货）；信号日若开盘涨停则机会直接放弃，实盘可能以更高成本追入；历史回测表现不代表未来收益。</li>
 </ul>
@@ -319,6 +330,10 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
       <button class="mode-btn on" data-m="on" onclick="setMode('on')">仓位控制 开</button>
       <button class="mode-btn" data-m="off" onclick="setMode('off')">关 (满仓无择时)</button>
     </div>
+    <div class="mode-sw" id="winSw" style="margin-top:6px">
+      <button class="mode-btn on" data-w="y1" onclick="setWin('y1')">近1年</button>
+      <button class="mode-btn" data-w="y3" onclick="setWin('y3')">近3年</button>
+    </div>
     <div class="mode-note">大盘状态机 Z0–Z3 · 锚定上证</div>
   </div>
 </div>
@@ -361,7 +376,8 @@ __STRAT_DOC__
 </div>
 <script>
 const MODES = __DATA__;
-let D = MODES.on;          // 默认: 开启仓位控制
+let curWin = 'y1';         // 净值窗口: y1=近1年 / y3=近3年
+let D = MODES[curWin].on;  // 默认: 近1年 · 开启仓位控制
 let curMode = 'on';
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
@@ -374,17 +390,25 @@ const WARN_OFF = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控�
 const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
    仓位控制(开): 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
-   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。净值窗口: 去年同期(自然日)起, 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。净值窗口: 近1年/近3年两档(右上角切换, 自然日起算), 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
 const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
    仓位控制(关): 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
-   策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。净值窗口: 去年同期(自然日)起, 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+   策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。净值窗口: 近1年/近3年两档(右上角切换, 自然日起算), 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
 function setMode(m){
-  if(!MODES[m] || m===curMode) return;
-  curMode = m; D = MODES[m];
-  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  if(!MODES[curWin][m] || m===curMode) return;
+  curMode = m; D = MODES[curWin][m];
+  document.querySelectorAll('#modeSw .mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
   document.getElementById('warnBar').innerHTML = m==='on' ? WARN_ON : WARN_OFF;
   document.getElementById('foot').innerHTML = m==='on' ? FOOT_ON : FOOT_OFF;
+  renderAll();
+}
+
+// ---------- 净值窗口切换 (近1年/近3年) ----------
+function setWin(w){
+  if(!MODES[w] || w===curWin) return;
+  curWin = w; D = MODES[w][curMode];
+  document.querySelectorAll('#winSw .mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.w===w));
   renderAll();
 }
 
@@ -473,7 +497,7 @@ function drawEquity(){
     xAxis:{type:'category',data:sl.dates,axisLabel:{fontSize:10,color:'#88867E'}},
     yAxis:{type:'value',scale:true,axisLabel:{fontSize:10,color:'#88867E',formatter:nf}},
     series}, true);
-  document.getElementById('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
+  document.getElementById('eqNote').textContent = `(${D.win_label}: ${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
 }
 
 function drawReasons(tr){
@@ -549,7 +573,7 @@ function renderAll(){
 }
 
 document.getElementById('sub').textContent =
-  `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (去年同期起) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
+  `生成于 ${D.generated} · 净值窗口 近1年/近3年可切换 (当前 ${D.win_label}: ${D.start_day} ~ ${D.last_day}) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('warnBar').innerHTML = WARN_ON;
 document.getElementById('foot').innerHTML = FOOT_ON;
 
