@@ -6,13 +6,15 @@ hfq 历史值永久冻结(不像 qfq 随最新价整体缩放), 保证信号可�
 输出: data/kline/hfq_b{i}_{n}.parquet (每200只一个分片, 保留 sh./sz. 前缀)
 断点: data/meta/hfq_progress_{i}.json
 """
+import datetime
 import json, os, sys, time
 import pandas as pd
 import baostock as bs
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KDIR, META = f"{BASE}/data/kline", f"{BASE}/data/meta"
-START, END = "2023-01-01", "2026-09-05"
+START = "2023-01-01"
+END = datetime.date.today().strftime("%Y-%m-%d")  # 动态截止, 避免硬编码过期后回补出静默缺口
 FIELDS_Q = "date,open,high,low,close"
 
 

@@ -26,17 +26,19 @@ def make_session():
 def load_store():
     shards = sorted(glob.glob(f"{KDIR}/raw_*.parquet"))
     incs = sorted(glob.glob(f"{KDIR}/incremental/raw_*.parquet"))
-    fixs = sorted(glob.glob(f"{KDIR}/fixup/*.parquet"))
+    fixs = sorted(glob.glob(f"{KDIR}/fixup/raw_*.parquet"))  # 只取 raw 修复件, glob 到 hfq_*.parquet 会把复权行拼进不复权库
     dfs = [pd.read_parquet(f) for f in shards + incs]
     df = pd.concat(dfs, ignore_index=True)
+    df["date"] = pd.to_datetime(df["date"])
+    # 统一代码格式为腾讯式 (1.600000/0.000001): 历史分片是 baostock 式 (sh./sz.),
+    # 快照增量是腾讯式 —— 不统一会导致 ratio/除权检测的键全部 miss (冷启动事故)。
+    # 必须在 fixup 覆盖之前统一: fixup 文件名/内容是腾讯式, 历史分片是 baostock 式,
+    # 顺序颠倒会让覆盖 isin 全 miss -> 整段重复行 (2026-09-08 verify_store 发现)
+    df["code"] = df["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     if fixs:
         fix = pd.concat([pd.read_parquet(f) for f in fixs], ignore_index=True)
         df = df[~df["code"].isin(set(fix["code"]))]
         df = pd.concat([df, fix], ignore_index=True)
-    df["date"] = pd.to_datetime(df["date"])
-    # 统一代码格式为腾讯式 (1.600000/0.000001): 历史分片是 baostock 式 (sh./sz.),
-    # 快照增量是腾讯式 —— 不统一会导致 ratio/除权检测的键全部 miss (冷启动事故)
-    df["code"] = df["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     return df.sort_values(["code", "date"]).reset_index(drop=True)
 
 

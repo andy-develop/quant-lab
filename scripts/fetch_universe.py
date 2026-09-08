@@ -70,8 +70,9 @@ def fetch_em_kline(secid, fqt="0", retries=3):
 
 def main():
     df = fetch_universe()
-    # 指数 + 基准
-    for secid, name in [("1.000001", "index_daily"), ("1.000300", "bench_daily")]:
+    # 指数 + 基准 (csi1000_daily=中证1000: 大盘状态机/净值图基准)
+    for secid, name in [("1.000001", "index_daily"), ("1.000300", "bench_daily"),
+                        ("1.000852", "csi1000_daily")]:
         k = fetch_em_kline(secid)
         if k is not None:
             k.to_parquet(f"{BASE}/data/meta/{name}.parquet", index=False)

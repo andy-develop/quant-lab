@@ -3,6 +3,7 @@
 不复权(bfq) + 前复权(qfq) 双序列, 分片 parquet, 断点续拉。
 用法: python backfill_kline.py [--threads 4]
 """
+import datetime
 import json, os, sys, time, threading, queue
 import pandas as pd
 import requests
@@ -10,7 +11,8 @@ import requests
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根目录(本地/CI通用)
 KDIR = f"{BASE}/data/kline"
 META = f"{BASE}/data/meta"
-BEG, END, COUNT = "2023-09-01", "2026-09-05", "800"
+BEG, COUNT = "2023-09-01", "800"
+END = datetime.date.today().strftime("%Y-%m-%d")  # 动态截止, 避免硬编码过期后回补出静默缺口
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
       "Referer": "https://gu.qq.com/"}
 COLS = ["date", "open", "close", "high", "low", "volume"]
