@@ -181,7 +181,7 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return sig, score
 
 
-SCORE_MODE = "quality"    # momentum | quality | quality_kdj5 | quality_kdj10 | amihud | voladj | kdj | kdj_rev —— 2026-09-08 A/B 台账: quality 胜出; kdj(低吸方向) 开+26.5%/关-36.2% 劣于 quality; kdj_rev(追涨方向) 开-51.4%/关-94.5% 灾难性 —— J 偏离有信息但单因子弱于合成; quality_kdj* 为 kdj 以微权重(5%/10%)并入 quality 的混合版
+SCORE_MODE = "quality_kdj5"    # momentum | quality | quality_kdj5 | quality_kdj10 | amihud | voladj | kdj | kdj_rev —— 2026-09-08 A/B 台账: quality 胜出纯动量/kdj单因子; 晚间混合 A/B: quality_kdj5(开+115.3%/-13.1%/夏普1.45, 全部子区间跑赢基线 quality 开+31.8%) 切默认, kdj10(开+91.6%/关+94.2%) 备选; 回滚改此一行即可
 
 
 def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[str, pd.Series]:
