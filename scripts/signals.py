@@ -181,7 +181,7 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return sig, score
 
 
-SCORE_MODE = "quality"    # momentum | quality | amihud | voladj | kdj | kdj_rev —— 2026-09-08 三轮 A/B: quality 胜出; kdj(20日均J-信号日J, 低吸方向) 开+26.5%/-37.0% 关-36.2%, 劣于 quality; kdj_rev(追涨方向) 开-51.4% 关-94.5% 灾难性, 方向性极强说明 J 偏离有信息但单因子弱于合成
+SCORE_MODE = "quality"    # momentum | quality | quality_kdj5 | quality_kdj10 | amihud | voladj | kdj | kdj_rev —— 2026-09-08 A/B 台账: quality 胜出; kdj(低吸方向) 开+26.5%/关-36.2% 劣于 quality; kdj_rev(追涨方向) 开-51.4%/关-94.5% 灾难性 —— J 偏离有信息但单因子弱于合成; quality_kdj* 为 kdj 以微权重(5%/10%)并入 quality 的混合版
 
 
 def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[str, pd.Series]:
@@ -196,6 +196,7 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
       kdj     : KDJ均值偏离 = 20日均J - 信号日J (用户公式)。值大=J自高位回落,
                 偏好强势股中的短期回调 (低吸方向)
       kdj_rev : kdj 的反向对照 (-j_dev), 偏好 J 加速上冲 (追涨方向), 用于检验方向
+      quality_kdj5 / quality_kdj10 : kdj 以 5%/10% 微权重并入 quality 合成 (A/B 用)
     """
     rk = lambda s: s.groupby(level=1).rank(pct=True)
     mom = rk(df["ret20"])
@@ -208,9 +209,17 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
                + 0.20 * rk(df["win60"])
                + 0.15 * rk(df["trend_streak"])
                + 0.10 * rk(-df["vol20"]))
+    # quality + kdj 混合: kdj(20日均J-信号日J, 低吸方向)以微权重并入 quality 合成。
+    # kdj5: 从最低权重因子(-vol 0.10)匀 0.05 给 kdj; kdj10: 五因子等比缩放×0.9 腾出 0.10。
+    kdj = rk(df["j_dev"])
+    quality_kdj5 = (0.30 * mom + 0.25 * rk(df["sharpe20"]) + 0.20 * rk(df["win60"])
+                    + 0.15 * rk(df["trend_streak"]) + 0.05 * rk(-df["vol20"]) + 0.05 * kdj)
+    quality_kdj10 = (0.27 * mom + 0.225 * rk(df["sharpe20"]) + 0.18 * rk(df["win60"])
+                     + 0.135 * rk(df["trend_streak"]) + 0.09 * rk(-df["vol20"]) + 0.10 * kdj)
     amihud = mom * rk(1.0 / df["illiq20"])
-    return {"momentum": mom, "quality": quality, "amihud": amihud, "voladj": voladj,
-            "kdj": rk(df["j_dev"]), "kdj_rev": rk(-df["j_dev"])}
+    return {"momentum": mom, "quality": quality, "quality_kdj5": quality_kdj5,
+            "quality_kdj10": quality_kdj10, "amihud": amihud, "voladj": voladj,
+            "kdj": kdj, "kdj_rev": rk(-df["j_dev"])}
 
 
 def exit_flags(df: pd.DataFrame) -> pd.Series:
@@ -219,7 +228,11 @@ def exit_flags(df: pd.DataFrame) -> pd.Series:
     return shrink
 
 
-def run_scan() -> pd.DataFrame:
+def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.DataFrame:
+    """score_mode/out_file: A/B 用 —— 指定本次扫描的评分模式与信号输出路径;
+    默认 None 走生产口径 (SCORE_MODE / data/meta/signals.parquet), 行为不变。"""
+    mode = score_mode or SCORE_MODE
+    out_file = out_file or f"{BASE}/data/meta/signals.parquet"
     t0 = time.time()
     print("加载K线分片...", flush=True)
     hfq = load_klines("hfq")
@@ -256,7 +269,7 @@ def run_scan() -> pd.DataFrame:
     idx_close = pd.read_parquet(f"{BASE}/data/meta/index_daily.parquet").set_index("date")["close"].sort_index()
     idx_vol20 = idx_close.pct_change().rolling(20).std()
     sig_c, _ = signal_momentum(df)
-    score_c = signal_scores(df, idx_vol=idx_vol20)[SCORE_MODE]
+    score_c = signal_scores(df, idx_vol=idx_vol20)[mode]
     shrink = exit_flags(df)
 
     names = basic.set_index("secid")["name"]
@@ -276,8 +289,8 @@ def run_scan() -> pd.DataFrame:
     # 评分归一: 策略内按日排名分位 (0-1); 合成评分本身已秩归一, 再排名不改变顺序
     signals["score"] = signals.groupby(["date", "strategy"])["score"].rank(pct=True)
     signals = signals.sort_values(["date", "strategy", "score"], ascending=[True, True, False])
-    signals.to_parquet(f"{BASE}/data/meta/signals.parquet", index=False)
-    print(f"信号总数: {len(signals):,}  (动量轮动, 评分模式={SCORE_MODE})", flush=True)
+    signals.to_parquet(out_file, index=False)
+    print(f"信号总数: {len(signals):,}  (动量轮动, 评分模式={mode}, 输出={out_file.split('/')[-1]})", flush=True)
 
     # 退出标志 -> 宽表
     idx = df.index
