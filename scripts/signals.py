@@ -92,6 +92,18 @@ def build_indicators(hfq: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     r_open = r["open"].reindex(df.index)
     df["raw_open"] = r_open
 
+    # ---- 评分因子 (2026-09-08 引入, 仅影响同日候选的买入优先级, 不改选股条件) ----
+    df["vol20"] = groll(df["ret"], 20, "std")                       # 20日日收益波动率
+    df["sharpe20"] = df["ret20"] / (df["vol20"] * np.sqrt(20))      # 20日夏普 (区间收益/区间波动)
+    df["win60"] = groll((df["ret"] > 0).astype(float), 60, "mean")  # 60日上涨天数占比
+    # 趋势一致性: MA5>MA10>MA20>MA60 的连续天数 (bool 段内计数, 断点归零)
+    bull = (df["ma5"] > df["ma10"]) & (df["ma10"] > df["ma20"]) & (df["ma20"] > df["ma60"])
+    seg = (~bull).groupby(level=0, sort=False).cumsum()
+    df["trend_streak"] = bull.groupby([df.index.get_level_values(0), seg], sort=False).cumcount() + 1
+    df.loc[~bull, "trend_streak"] = 0
+    # Amihud 非流动性: 20日平均 |日收益|/成交额(元); amt=0(停牌) -> NaN, 评分日候选自然剔除
+    df["illiq20"] = groll((df["ret"].abs() / df["amt"].replace(0, np.nan)), 20, "mean")
+
     return df
 
 
@@ -159,6 +171,28 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return sig, score
 
 
+SCORE_MODE = "quality"    # momentum | quality | amihud —— 2026-09-08 A/B: quality 胜出(关模式隔离组 +43.7% vs -78.3%, 开模式回撤减半), amihud 淘汰(+5.0%)
+
+
+def signal_scores(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """候选股买入优先级评分 (0-1, 按日横截面排名分位)。只影响同日多信号时的
+    买入顺序/名额竞争, 不改变选股条件。三套口径 A/B 后择优:
+      momentum: 纯 20 日动量 (原版)
+      quality : 中泰金工趋势质量合成 0.3动量+0.25夏普+0.2胜率+0.15趋势一致性+0.1低波动
+      amihud  : 动量 × 流动性分位 (Amihud 非流动性倒数排名, 奖励低流动性溢价;
+                用户原始公式 评分×(1/Amihud) 的秩归一版, 避免量纲主导)
+    """
+    rk = lambda s: s.groupby(level=1).rank(pct=True)
+    mom = rk(df["ret20"])
+    quality = (0.30 * mom
+               + 0.25 * rk(df["sharpe20"])
+               + 0.20 * rk(df["win60"])
+               + 0.15 * rk(df["trend_streak"])
+               + 0.10 * rk(-df["vol20"]))
+    amihud = mom * rk(1.0 / df["illiq20"])
+    return {"momentum": mom, "quality": quality, "amihud": amihud}
+
+
 def exit_flags(df: pd.DataFrame) -> pd.Series:
     """放量滞涨标志 (趋势破位规则已于 2026-09-07 移除: A/B 证实纯负贡献)"""
     shrink = (df["volume"] >= 2 * df["prev_vol_ma5"]) & (df["ret"] < 0) & (df["close"] < df["open"])
@@ -199,7 +233,8 @@ def run_scan() -> pd.DataFrame:
     print(f"[计时] 加载+指标+过滤 {time.time()-t0:.0f}s", flush=True)
 
     market_regime()
-    sig_c, score_c = signal_momentum(df)
+    sig_c, _ = signal_momentum(df)
+    score_c = signal_scores(df)[SCORE_MODE]
     shrink = exit_flags(df)
 
     names = basic.set_index("secid")["name"]
@@ -216,11 +251,11 @@ def run_scan() -> pd.DataFrame:
 
     signals = collect(sig_c, score_c, "momentum")
     signals["name"] = signals["code"].map(names)
-    # 评分归一: 策略内按日排名分位 (0-1)
+    # 评分归一: 策略内按日排名分位 (0-1); 合成评分本身已秩归一, 再排名不改变顺序
     signals["score"] = signals.groupby(["date", "strategy"])["score"].rank(pct=True)
     signals = signals.sort_values(["date", "strategy", "score"], ascending=[True, True, False])
     signals.to_parquet(f"{BASE}/data/meta/signals.parquet", index=False)
-    print(f"信号总数: {len(signals):,}  (动量轮动)", flush=True)
+    print(f"信号总数: {len(signals):,}  (动量轮动, 评分模式={SCORE_MODE})", flush=True)
 
     # 退出标志 -> 宽表
     idx = df.index
