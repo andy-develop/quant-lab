@@ -4,7 +4,13 @@
 用法: python backfill_kline.py [--threads 4]
 """
 import datetime
-import json, os, sys, time, threading, queue
+import json
+import os
+import queue
+import sys
+import threading
+import time
+
 import pandas as pd
 import requests
 
@@ -18,14 +24,14 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit
 COLS = ["date", "open", "close", "high", "low", "volume"]
 
 
-def make_session():
+def make_session() -> requests.Session:
     s = requests.Session()
     s.trust_env = False
     s.headers.update(UA)
     return s
 
 
-def fetch_kline(s, sym, fq):
+def fetch_kline(s: requests.Session, sym: str, fq: str) -> pd.DataFrame | None:
     """fq: '' 不复权 / 'qfq' 前复权. 返回 DataFrame 或 None."""
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     for attempt in range(3):
@@ -52,33 +58,35 @@ def fetch_kline(s, sym, fq):
     return None
 
 
-def to_tencent(secid):
+def to_tencent(secid: str) -> str:
     mkt, num = secid.split(".")
     return ("sh" if mkt == "1" else "sz") + num
 
 
-def fetch_index(s, sym):
+def fetch_index(s: requests.Session, sym: str) -> pd.DataFrame | None:
     df = fetch_kline(s, sym, "")
     if df is not None:
         df = df.rename(columns={"volume": "volume"})
     return df
 
 
-def main():
+def main() -> None:
     n_threads = int(sys.argv[sys.argv.index("--threads") + 1]) if "--threads" in sys.argv else 4
     basic = pd.read_parquet(f"{META}/stock_basic.parquet")
     secids = basic["secid"].tolist()
     # 断点续拉
-    done = set()
+    done: set[str] = set()
     prog_path = f"{META}/backfill_progress.json"
     if os.path.exists(prog_path):
-        done = set(json.load(open(prog_path)))
+        with open(prog_path) as f:
+            done = set(json.load(f))
     # baostock 回补已完成的也跳过 (bs_progress_*.json 里是 sh.600000 格式)
-    import glob, os as _glob
-    for pf in _glob.glob(f"{META}/bs_progress_*.json"):
-        for c in json.load(open(pf)):
-            mkt, num = c.split(".")
-            done.add(("1." if mkt == "sh" else "0.") + num)
+    import glob
+    for pf in glob.glob(f"{META}/bs_progress_*.json"):
+        with open(pf) as f:
+            for c in json.load(f):
+                mkt, num = c.split(".")
+                done.add(("1." if mkt == "sh" else "0.") + num)
     todo = [x for x in secids if x not in done]
     print(f"总 {len(secids)}, 已完成 {len(done)}, 待拉 {len(todo)}", flush=True)
 
@@ -95,18 +103,18 @@ def main():
                 print(f"{name}: 获取失败", flush=True)
         time.sleep(0.3)
 
-    task_q = queue.Queue()
+    task_q: queue.Queue = queue.Queue()
     for x in todo:
         task_q.put(x)
-    result_q = queue.Queue()
-    failed = []
+    failed: list[str] = []
     fail_lock = threading.Lock()
     SHARD = 500
     shard_no = len([f for f in os.listdir(KDIR) if f.startswith("raw_")]) if os.path.exists(KDIR) else 0
-    buf, buf_lock = [], threading.Lock()
+    buf: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
+    buf_lock = threading.Lock()
     counter = [0]
 
-    def flush(force=False):
+    def flush(force: bool = False) -> None:
         nonlocal shard_no
         if not buf:
             return
@@ -122,10 +130,11 @@ def main():
         pd.concat(qfqs).to_parquet(f"{KDIR}/qfq_{shard_no:03d}.parquet", index=False)
         shard_no += 1
         buf.clear()
-        json.dump(sorted(done), open(prog_path, "w"))
+        with open(prog_path, "w") as f:
+            json.dump(sorted(done), f)
         print(f"[进度] {counter[0]}/{len(todo)} 完成, 分片 {shard_no}", flush=True)
 
-    def worker(worker_id):
+    def worker(worker_id: int) -> None:
         s = make_session()
         consecutive_fail = 0
         while True:
@@ -161,7 +170,8 @@ def main():
     for t in threads:
         t.join()
     flush(force=True)
-    json.dump(sorted(failed), open(f"{META}/backfill_failed.json", "w"))
+    with open(f"{META}/backfill_failed.json", "w") as f:
+        json.dump(sorted(failed), f)
     print(f"回补结束: 成功 {len(done)}, 失败 {len(failed)}, 分片 {shard_no}", flush=True)
 
 

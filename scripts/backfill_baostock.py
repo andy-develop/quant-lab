@@ -1,4 +1,3 @@
-import os
 #!/usr/bin/env python3
 """baostock 历史K线回补 (4进程并行, 每进程独立TCP连接)。
 用法: python backfill_baostock.py <worker_id> <total_workers>
@@ -6,7 +5,11 @@ import os
 断点: data/meta/bs_progress_{i}.json
 """
 import datetime
-import json, os, sys, time
+import json
+import os
+import sys
+import time
+
 import pandas as pd
 import baostock as bs
 
@@ -18,7 +21,7 @@ FIELDS = "date,open,high,low,close,volume,amount"
 FIELDS_Q = "date,open,high,low,close"
 
 
-def query(bs_mod, code, adjust):
+def query(bs_mod, code: str, adjust: str) -> pd.DataFrame | None:
     flds = FIELDS if adjust == "3" else FIELDS_Q
     rs = bs_mod.query_history_k_data_plus(code, flds, start_date=START, end_date=END,
                                           frequency="d", adjustflag=adjust)
@@ -33,7 +36,7 @@ def query(bs_mod, code, adjust):
     return df.dropna(subset=["close"]).reset_index(drop=True)
 
 
-def main():
+def main() -> None:
     wid, total = int(sys.argv[1]), int(sys.argv[2])
     basic = pd.read_parquet(f"{META}/stock_basic.parquet")
     # 过滤 ST/退整 (与 signals 保持一致); 2023-09 前已退市且无窗口内数据的跳过
@@ -42,13 +45,17 @@ def main():
     codes = sorted(basic["code"].tolist())
     mine = codes[wid::total]
 
-    done = set()
+    done: set[str] = set()
     prog_path = f"{META}/bs_progress_{wid}.json"
     if os.path.exists(prog_path):
-        done = set(json.load(open(prog_path)))
+        with open(prog_path) as f:
+            done = set(json.load(f))
     # 兼容: 腾讯源已完成的也跳过
     tp = f"{META}/backfill_progress.json"
-    tencent_done = set(json.load(open(tp))) if os.path.exists(tp) else set()
+    tencent_done: set[str] = set()
+    if os.path.exists(tp):
+        with open(tp) as f:
+            tencent_done = set(json.load(f))
     tc2bs = {}
     for c in tencent_done:
         mkt, num = c.split(".")
@@ -58,10 +65,11 @@ def main():
     print(f"[worker-{wid}] 分到 {len(mine)}, 已完成 {len(done & set(mine))}, 腾讯已拉 {len(set(mine)&set(tc2bs))}, 待拉 {len(todo)}", flush=True)
     bs.login()
     shard_no = len([f for f in os.listdir(KDIR) if f.startswith(f"raw_b{wid}_")])
-    buf_r, buf_q = [], []
+    buf_r: list[pd.DataFrame] = []
+    buf_q: list[pd.DataFrame] = []
     t_start, n_ok, n_fail = time.time(), 0, 0
 
-    def flush(force=False):
+    def flush(force: bool = False) -> None:
         nonlocal shard_no
         if buf_r and (len(buf_r) >= 200 or force):
             pd.concat(buf_r).to_parquet(f"{KDIR}/raw_b{wid}_{shard_no:02d}.parquet", index=False)
@@ -84,7 +92,8 @@ def main():
             done.add(code)
         flush()
         if (k + 1) % 100 == 0:
-            json.dump(sorted(done), open(prog_path, "w"))
+            with open(prog_path, "w") as f:
+                json.dump(sorted(done), f)
             el = time.time() - t_start
             eta = el / (k + 1) * (len(todo) - k - 1)
             print(f"[worker-{wid}] {k+1}/{len(todo)} ok={n_ok} fail={n_fail} "
@@ -92,7 +101,8 @@ def main():
         if (k + 1) % 1000 == 0:
             time.sleep(5)  # 防护性间歇
     flush(force=True)
-    json.dump(sorted(done), open(prog_path, "w"))
+    with open(prog_path, "w") as f:
+        json.dump(sorted(done), f)
     print(f"[worker-{wid}] 完成: ok={n_ok} fail={n_fail} 分片={shard_no}", flush=True)
     bs.logout()
 

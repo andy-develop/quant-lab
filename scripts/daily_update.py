@@ -6,7 +6,11 @@
 4. 输出汇总 data/pool/summary.csv
 用法: python daily_update.py
 """
-import glob, os, json, os, time
+import glob
+import json
+import os
+import time
+
 import numpy as np
 import pandas as pd
 import requests
@@ -16,14 +20,14 @@ META, KDIR, POOL = f"{BASE}/data/meta", f"{BASE}/data/kline", f"{BASE}/data/pool
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
 
-def make_session():
+def make_session() -> requests.Session:
     s = requests.Session()
     s.trust_env = False
     s.headers.update(UA)
     return s
 
 
-def load_store():
+def load_store() -> pd.DataFrame:
     shards = sorted(glob.glob(f"{KDIR}/raw_*.parquet"))
     incs = sorted(glob.glob(f"{KDIR}/incremental/raw_*.parquet"))
     fixs = sorted(glob.glob(f"{KDIR}/fixup/raw_*.parquet"))  # 只取 raw 修复件, glob 到 hfq_*.parquet 会把复权行拼进不复权库
@@ -42,13 +46,13 @@ def load_store():
     return df.sort_values(["code", "date"]).reset_index(drop=True)
 
 
-def snapshot_day(s, secids, day_ts):
+def snapshot_day(s: requests.Session, secids: list[str], day_ts: pd.Timestamp) -> pd.DataFrame:
     """腾讯批量快照 -> 当日OHLCV (不复权)"""
     sym_map = {}
     for secid in secids:
         mkt, num = secid.split(".")
         sym_map[("sh" if mkt == "1" else "sz") + num] = secid
-    rows = []
+    rows: list[dict] = []
     syms = list(sym_map)
     for i in range(0, len(syms), 60):
         batch = syms[i:i + 60]
@@ -83,7 +87,7 @@ def snapshot_day(s, secids, day_ts):
     return pd.DataFrame(rows)
 
 
-def update_kline():
+def update_kline() -> pd.Timestamp:
     import datetime
     idx = pd.read_parquet(f"{META}/index_daily.parquet")
     last_idx_day = idx["date"].max()
@@ -142,7 +146,6 @@ def update_kline():
     print(f"快照 {len(snap)} 只, 检测到除权 {len(div_codes)} 只", flush=True)
     # hfq 折算因子: 库内最后一条 hfq_close / raw_close (后复权因子, 非除权日恒定)
     # hfq = raw × 因子 —— 与 qfq 不同, hfq 历史值永久冻结, 信号可复现 (缺陷④修复)
-    ratio = {}
     last_rows = store.groupby("code").tail(1).set_index("code")[["close"]]
     hfq_all = sorted(glob.glob(f"{KDIR}/hfq_*.parquet")) + sorted(glob.glob(f"{KDIR}/incremental/hfq_*.parquet"))
     hfq_last = pd.concat([pd.read_parquet(f) for f in hfq_all], ignore_index=True)
@@ -151,7 +154,7 @@ def update_kline():
     hfq_last["code"] = hfq_last["code"].str.replace("sh.", "1.", regex=False).str.replace("sz.", "0.", regex=False)
     hfq_last = hfq_last.groupby("code").tail(1).set_index("code")[["close"]].rename(columns={"close": "hfq_close"})
     rr = last_rows.join(hfq_last, how="inner")
-    ratio = (rr["hfq_close"] / rr["close"]).replace([np.inf, -np.inf], np.nan).dropna().to_dict()
+    ratio: dict[str, float] = (rr["hfq_close"] / rr["close"]).replace([np.inf, -np.inf], np.nan).dropna().to_dict()
     # 除权股整段重拉(修复): raw 网络重拉 + 由新 qfq 派生整段 hfq
     os.makedirs(f"{KDIR}/fixup", exist_ok=True)
     for code in div_codes:
@@ -176,7 +179,7 @@ def update_kline():
     return target_day
 
 
-def derive_hfq_fixup(code, qfq_fresh):
+def derive_hfq_fixup(code: str, qfq_fresh: pd.DataFrame) -> pd.DataFrame | None:
     """由整段重拉的新 qfq 派生 hfq: hfq = qfq × K, K = hfq库内最后收盘 / qfq同日收盘。
     (hfq/qfq 对同一快照为常数 —— 两者都是 raw×复权因子, 因子比值不随日期变)
     库内无该股 hfq 时返回 None (K 无法锚定)。"""
@@ -204,8 +207,8 @@ def derive_hfq_fixup(code, qfq_fresh):
     return out
 
 
-def refetch_one(s, code, sym):
-    def get(fq):
+def refetch_one(s: requests.Session, code: str, sym: str) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    def get(fq: str) -> pd.DataFrame | None:
         # 腾讯单次约800根上限, 分两段拼接 (2023-01 起约950个交易日)
         out = []
         for a, b in [("2023-01-01", "2024-12-31"), ("2025-01-01", "2026-12-31")]:
@@ -230,7 +233,7 @@ def refetch_one(s, code, sym):
     return raw, qfq
 
 
-def update_pool(last_day=None):
+def update_pool(last_day: pd.Timestamp | None = None) -> None:
     s = make_session()
     idx = pd.read_parquet(f"{META}/index_daily.parquet")
     recent = idx["date"].tail(10).dt.strftime("%Y%m%d").tolist()
@@ -263,7 +266,7 @@ def update_pool(last_day=None):
     print(f"涨停池汇总: {len(summary)} 个交易日 (最新 {summary['date'].iloc[-1] if len(summary) else '-'})", flush=True)
 
 
-def fetch_pool(s, fn, date_str):
+def fetch_pool(s: requests.Session, fn: str, date_str: str) -> pd.DataFrame | None:
     try:
         r = s.get(f"https://push2ex.eastmoney.com/{fn}",
                   params={"ut": "7eea3edcaed734bea9cbfc24409ed989", "dpt": "wz.ztzt",

@@ -16,7 +16,9 @@
 引擎侧另有: 止损-8%、持有满10日、(开模式) Z0 逃顶清仓。
 注: 趋势破位(破MA20)已于 2026-09-07 移除 —— A/B 证实纯负贡献。
 """
-import glob, os
+import glob
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -24,7 +26,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根�
 START = "2023-09-01"
 
 
-def load_klines(kind):
+def load_klines(kind: str) -> pd.DataFrame:
     """kind: raw / hfq -> 分片 + 增量 + 除权修复, 合并为长表"""
     files = sorted(glob.glob(f"{BASE}/data/kline/{kind}_*.parquet"))
     files += sorted(glob.glob(f"{BASE}/data/kline/incremental/{kind}_*.parquet"))
@@ -42,15 +44,15 @@ def load_klines(kind):
     return df.drop_duplicates(["code", "date"]).sort_values(["code", "date"])
 
 
-def groll(s, w, fn):
+def groll(s: pd.Series, w: int, fn: str) -> pd.Series:
     return s.groupby(level=0, sort=False).transform(lambda x: getattr(x.rolling(w, min_periods=w), fn)())
 
 
-def gshift(s, n):
+def gshift(s: pd.Series, n: int) -> pd.Series:
     return s.groupby(level=0, sort=False).transform(lambda x: x.shift(n))
 
 
-def build_indicators(hfq, raw):
+def build_indicators(hfq: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     """在 (code,date) MultiIndex 上计算全部指标。
     hfq: 后复权 OHLC —— 动量/均线等比值类指标, 历史值永久冻结、可复现;
          与 qfq 计算的区间收益完全一致(复权因子在比值中约掉)。
@@ -90,7 +92,7 @@ def build_indicators(hfq, raw):
     return df
 
 
-def market_regime(index_file=None, out_file=None):
+def market_regime(index_file: str | None = None, out_file: str | None = None) -> pd.DataFrame:
     """买卖点仓位状态机 -> 每日目标仓位比例 (默认锚定上证指数)
     参考: 用户腾讯文档《买卖点》(docs.qq.com/doc/DWGdJeWR0amRjc3ZC)
     Z0 空仓 / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%
@@ -105,7 +107,7 @@ def market_regime(index_file=None, out_file=None):
     ma5, ma10, ma20 = c.rolling(5).mean(), c.rolling(10).mean(), c.rolling(20).mean()
     ma5p, ma10p = ma5.shift(1), ma10.shift(1)
     ret = c.pct_change()
-    states = []
+    states: list[str] = []
     prev = "Z1"
     for i in range(len(idx)):
         if np.isnan(ma20.iloc[i]) or np.isnan(ma5p.iloc[i]):
@@ -143,7 +145,7 @@ def market_regime(index_file=None, out_file=None):
     return out
 
 
-def signal_momentum(df):
+def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     m1 = df["ret20"].groupby(level=1).rank(pct=True) >= 0.95    # 横截面Top5%
     m2 = (df["close"] > df["ma20"]) & (df["ma20"] > df["ma60"]) & df["ma60_rising"]
     m3 = df["ret20"] < 0.60                                     # 排除极端妖股
@@ -154,13 +156,13 @@ def signal_momentum(df):
     return sig, score
 
 
-def exit_flags(df):
+def exit_flags(df: pd.DataFrame) -> pd.Series:
     """放量滞涨标志 (趋势破位规则已于 2026-09-07 移除: A/B 证实纯负贡献)"""
     shrink = (df["volume"] >= 2 * df["prev_vol_ma5"]) & (df["ret"] < 0) & (df["close"] < df["open"])
     return shrink
 
 
-def run_scan():
+def run_scan() -> pd.DataFrame:
     print("加载K线分片...", flush=True)
     hfq = load_klines("hfq")
     raw = load_klines("raw")
@@ -184,7 +186,7 @@ def run_scan():
 
     names = basic.set_index("secid")["name"]
 
-    def collect(sig, score, strat):
+    def collect(sig: pd.Series, score: pd.Series, strat: str) -> pd.DataFrame:
         sub = df[sig.fillna(False)]
         out = pd.DataFrame({
             "code": sub.index.get_level_values(0),

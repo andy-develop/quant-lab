@@ -1,4 +1,3 @@
-import os
 #!/usr/bin/env python3
 """baostock 后复权(hfq) K线回补 —— 信号口径切换专用。
 hfq 历史值永久冻结(不像 qfq 随最新价整体缩放), 保证信号可复现。
@@ -7,7 +6,11 @@ hfq 历史值永久冻结(不像 qfq 随最新价整体缩放), 保证信号可�
 断点: data/meta/hfq_progress_{i}.json
 """
 import datetime
-import json, os, sys, time
+import json
+import os
+import sys
+import time
+
 import pandas as pd
 import baostock as bs
 
@@ -18,7 +21,7 @@ END = datetime.date.today().strftime("%Y-%m-%d")  # 动态截止, 避免硬编�
 FIELDS_Q = "date,open,high,low,close"
 
 
-def query(bs_mod, code):
+def query(bs_mod, code: str) -> pd.DataFrame | None:
     rs = bs_mod.query_history_k_data_plus(code, FIELDS_Q, start_date=START, end_date=END,
                                           frequency="d", adjustflag="1")  # 1=后复权
     rows = []
@@ -32,7 +35,7 @@ def query(bs_mod, code):
     return df.dropna(subset=["close"]).reset_index(drop=True)
 
 
-def main():
+def main() -> None:
     wid, total = int(sys.argv[1]), int(sys.argv[2])
     basic = pd.read_parquet(f"{META}/stock_basic.parquet")
     basic = basic[~basic["name"].str.contains("ST|退", na=False)]
@@ -40,19 +43,20 @@ def main():
     codes = sorted(basic["code"].tolist())          # baostock 格式 sh.600000
     mine = codes[wid::total]
 
-    done = set()
+    done: set[str] = set()
     prog_path = f"{META}/hfq_progress_{wid}.json"
     if os.path.exists(prog_path):
-        done = set(json.load(open(prog_path)))
+        with open(prog_path) as f:
+            done = set(json.load(f))
     todo = [c for c in mine if c not in done]
 
     print(f"[hfq-{wid}] 分到 {len(mine)}, 已完成 {len(done & set(mine))}, 待拉 {len(todo)}", flush=True)
     bs.login()
     shard_no = len([f for f in os.listdir(KDIR) if f.startswith(f"hfq_b{wid}_")])
-    buf = []
+    buf: list[pd.DataFrame] = []
     t_start, n_ok, n_fail = time.time(), 0, 0
 
-    def flush(force=False):
+    def flush(force: bool = False) -> None:
         nonlocal shard_no
         if buf and (len(buf) >= 200 or force):
             pd.concat(buf).to_parquet(f"{KDIR}/hfq_b{wid}_{shard_no:02d}.parquet", index=False)
@@ -70,7 +74,8 @@ def main():
             done.add(code)
         flush()
         if (k + 1) % 100 == 0:
-            json.dump(sorted(done), open(prog_path, "w"))
+            with open(prog_path, "w") as f:
+                json.dump(sorted(done), f)
             el = time.time() - t_start
             eta = el / (k + 1) * (len(todo) - k - 1)
             print(f"[hfq-{wid}] {k+1}/{len(todo)} ok={n_ok} fail={n_fail} "
@@ -78,7 +83,8 @@ def main():
         if (k + 1) % 1000 == 0:
             time.sleep(5)
     flush(force=True)
-    json.dump(sorted(done), open(prog_path, "w"))
+    with open(prog_path, "w") as f:
+        json.dump(sorted(done), f)
     print(f"[hfq-{wid}] 完成: ok={n_ok} fail={n_fail} 分片={shard_no}", flush=True)
     bs.logout()
 

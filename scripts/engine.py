@@ -34,22 +34,26 @@ MAX_HOLD = 10            # 最长持有交易日
 MIN_HOLD_SHRINK = 2      # 放量滞涨最小持有
 COMM, STAMP, SLIP = 0.0001, 0.0005, 0.001
 MIN_FEE = 5.0            # 单笔佣金最低 5 元
+LOT_SIZE = 100           # A股整手 (股)
+LIMIT_TOL = 0.002        # 涨跌停判定容差 (吸收复权/精度差)
+BUDGET_TOL = 1000.0      # 目标仓位预算判定容差 (元)
+MIN_REGIME_RATIO = 0.001 # 状态机目标仓位低于此视为空仓, 不开新仓
 
 
-def limit_pct(code):
+def limit_pct(code: str) -> float:
     c = code.split(".", 1)[-1]            # "1.300750"/"sz.300750" -> "300750"
     return 0.20 if c[:2] in ("30", "68") else 0.10
 
 
-def buy_fee(amount):
+def buy_fee(amount: float) -> float:
     return max(amount * COMM, MIN_FEE)
 
 
-def sell_fee(amount):
+def sell_fee(amount: float) -> float:
     return max(amount * COMM, MIN_FEE) + amount * STAMP   # 印花税无下限
 
 
-def load_wide():
+def load_wide() -> dict[str, pd.DataFrame]:
     fl = pd.read_parquet(f"{BASE}/data/meta/flags_long.parquet")
     fl["date"] = pd.to_datetime(fl["date"])
     piv = {}
@@ -59,7 +63,7 @@ def load_wide():
     return piv
 
 
-def load_signals_wide():
+def load_signals_wide() -> tuple[dict[str, pd.DataFrame], pd.Series]:
     sig = pd.read_parquet(f"{BASE}/data/meta/signals.parquet")
     sig["date"] = pd.to_datetime(sig["date"])
     # 同一(code,date)去重取分最高
@@ -71,7 +75,8 @@ def load_signals_wide():
     return out, names
 
 
-def run_backtest(start=None, use_regime=True, out_dir=None):
+def run_backtest(start: str | None = None, use_regime: bool = True,
+                 out_dir: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     piv = load_wide()
     sig_w, names = load_signals_wide()
     cal = piv["close"].index
@@ -89,8 +94,8 @@ def run_backtest(start=None, use_regime=True, out_dir=None):
     pct = pd.Series({c: limit_pct(c) for c in qc.columns})
     pct_frame = pd.DataFrame({c: pct[c] for c in qc.columns}, index=qc.index)
     open_ret = qo / prev_qc - 1
-    no_buy = open_ret >= (pct_frame - 0.002)          # 开盘涨停/接近一字 -> 买不进
-    no_sell = open_ret <= -(pct_frame - 0.002)        # 开盘跌停 -> 卖不出
+    no_buy = open_ret >= (pct_frame - LIMIT_TOL)          # 开盘涨停/接近一字 -> 买不进
+    no_sell = open_ret <= -(pct_frame - LIMIT_TOL)        # 开盘跌停 -> 卖不出
 
     # 大盘仓位状态机 (use_regime=False 时不启用, 始终满仓)
     # 关键: 状态由 T 日收盘计算, T 日开盘不可见 -> 必须平移一日, 用 T-1 收盘状态驱动 T 日开盘动作 (防未来函数)
@@ -156,7 +161,7 @@ def run_backtest(start=None, use_regime=True, out_dir=None):
                 cl_ = pos_.get("last_close", np.nan)
                 mv += pos_["shares"] * (cl_ if not np.isnan(cl_) else pos_["entry_adj"])
         cands = []
-        if prev_day is not None and ratio >= 0.001:
+        if prev_day is not None and ratio >= MIN_REGIME_RATIO:
             for strat, sw in sig_w.items():
                 if prev_day in sw.index:
                     row = sw.loc[prev_day].dropna()
@@ -169,7 +174,7 @@ def run_backtest(start=None, use_regime=True, out_dir=None):
         for rank_c, (sc, strat, code) in enumerate(cands, 1):
             if free <= 0 or n_try >= MAX_BUY_PER_DAY:
                 break
-            if use_regime and mv >= max_invest - 1000:   # 预算用尽 (1000元容差)
+            if use_regime and mv >= max_invest - BUDGET_TOL:   # 预算用尽 (BUDGET_TOL 容差)
                 break
             if code in held:
                 continue
@@ -182,8 +187,8 @@ def run_backtest(start=None, use_regime=True, out_dir=None):
                        cash / max(free, 1))
             if use_regime:
                 slot = min(slot, max_invest - mv)    # 不超目标仓位预算
-            shares = int(slot / (px * 100)) * 100
-            if shares < 100:
+            shares = int(slot / (px * LOT_SIZE)) * LOT_SIZE   # A股整手
+            if shares < LOT_SIZE:
                 continue
             cost = shares * px * (1 + SLIP)
             fee = buy_fee(cost)
