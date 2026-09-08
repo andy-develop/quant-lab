@@ -18,7 +18,7 @@ REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
                "expired": "持有满 10 个交易日",
                "quick_fail": "首日收盘浮亏超阈值",
                "market_exit": "大盘触发 Z0 空仓信号, 全线清仓"}
-WINDOW_DAYS = 244        # 报告窗口: 近一年(交易日)
+WINDOW_YEARS = 1         # 报告窗口: 去年同期(自然日)起, 起点净值归一 100 万
 
 
 def _shared():
@@ -49,13 +49,17 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs):
     hold["entry_date"] = pd.to_datetime(hold["entry_date"])
 
     last_day = eq.index[-1]
-    # ---- 报告窗口: 近一年 ----
-    if len(eq) > WINDOW_DAYS:
-        eq = eq.iloc[-WINDOW_DAYS:]
+    # ---- 报告窗口: 去年同期(自然日)起, 如今天 2026-09-08 -> 2025-09-08 ----
+    win_start = last_day - pd.DateOffset(years=WINDOW_YEARS)
+    if eq.index[0] < win_start:
+        eq = eq[eq.index >= win_start]
         bench = bench.reindex(eq.index).ffill()
         bench1000 = bench1000.reindex(eq.index).ffill()   # 必须与 eq 同步截断, 否则前端窗口切片错位
     start_day = eq.index[0]
     trades = trades[trades["exit_date"] >= start_day].reset_index(drop=True)
+    # ---- 起点归一: 窗口首日净值 = ¥100万 (两种模式口径一致, 基准同基准化) ----
+    raw_last_eq = float(eq.iloc[-1])          # 归一前留存, 用于真实仓位比例
+    eq = eq / eq.iloc[0] * 1_000_000.0
 
     # ---- 待买清单: 最后交易日的信号 ----
     last_sigs = sigs[sigs["date"] == last_day].sort_values("score", ascending=False).reset_index(drop=True)
@@ -133,7 +137,7 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs):
         for _, r in hold[hold["date"] == last_day].sort_values("strategy").iterrows()
     ]
     hold_value = sum(x["value"] for x in hold_list)
-    hold_ratio = hold_value / float(eq.iloc[-1]) if float(eq.iloc[-1]) > 0 else 0.0
+    hold_ratio = hold_value / raw_last_eq if raw_last_eq > 0 else 0.0
 
     # ---- JSON 载荷 ----
     return {
@@ -370,11 +374,11 @@ const WARN_OFF = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控�
 const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
    仓位控制(开): 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
-   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+   策略贡献盈亏为交易盈亏加总(不含空仓资金占用), 胜率为区间内平仓交易口径。净值窗口: 去年同期(自然日)起, 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
 const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满10日退出; 无大盘择时, 始终满仓。<br>
    仓位控制(关): 每日最多新开仓 3 只, 最多同时持有 10 只, 单只预算≈总资金/10。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整。<br>
-   策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
+   策略贡献盈亏为交易盈亏加总, 胜率为区间内平仓交易口径。净值窗口: 去年同期(自然日)起, 策略与基准均以窗口首日 = ¥100万 归一。数据源: 腾讯行情 · 东财涨停池 · baostock 股票池(含退市)。仅供研究, 不构成投资建议。`;
 function setMode(m){
   if(!MODES[m] || m===curMode) return;
   curMode = m; D = MODES[m];
@@ -469,7 +473,7 @@ function drawEquity(){
     xAxis:{type:'category',data:sl.dates,axisLabel:{fontSize:10,color:'#88867E'}},
     yAxis:{type:'value',scale:true,axisLabel:{fontSize:10,color:'#88867E',formatter:nf}},
     series}, true);
-  document.getElementById('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 初始资金 ¥100万)`;
+  document.getElementById('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
 }
 
 function drawReasons(tr){
@@ -545,7 +549,7 @@ function renderAll(){
 }
 
 document.getElementById('sub').textContent =
-  `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (近一年) · 初始资金 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
+  `生成于 ${D.generated} · 报告窗口 ${D.start_day} ~ ${D.last_day} (去年同期起) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('warnBar').innerHTML = WARN_ON;
 document.getElementById('foot').innerHTML = FOOT_ON;
 
