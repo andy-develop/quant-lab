@@ -333,7 +333,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>A股短线策略实验室 · 回测报告</title>
+<title>A股短线策略实验室（动量策略） · 回测报告</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 :root{--bg:#F6F6F4;--card:#FFFFFF;--ink:#26251F;--muted:#88867E;--line:#E4E3DC;
@@ -378,7 +378,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 <div class="wrap">
 <div class="hdr">
   <div>
-    <h1>A股短线策略实验室</h1>
+    <h1>A股短线策略实验室（动量策略）</h1>
     <div class="sub" id="sub"></div>
   </div>
   <div>
