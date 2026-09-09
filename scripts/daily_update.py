@@ -110,7 +110,9 @@ def update_kline() -> pd.Timestamp:
     if store["date"].max() >= target_day:
         print(f"库内已有 {store['date'].max():%Y-%m-%d} 数据, 跳过K线更新", flush=True)
         return target_day
-    prev_trade_day = idx["date"].iloc[-1]
+    # 上一交易日以 K线库最后一天为准 (此前用 index_daily 最后一天 —— 指数快照静默
+    # 落后时, 快照昨收 vs 库内收盘整体错位, 除权检测假阳性爆发)
+    prev_trade_day = store["date"].max()
     prev_rows = store[store["date"] == prev_trade_day].set_index("code")["close"]
 
     s = make_session()
@@ -119,30 +121,67 @@ def update_kline() -> pd.Timestamp:
         print("快照获取失败!", flush=True)
         return target_day
     # 指数快照 -> 追加指数日线 (下个交易日历前提)
-    try:
-        r = s.get("https://qt.gtimg.cn/q=sh000001,sh000300,sh000852", timeout=15)
-        r.encoding = "gbk"
-        idx_rows = []
-        for sym, p in [("sh000001", f"{META}/index_daily.parquet"),
-                       ("sh000300", f"{META}/bench_daily.parquet"),
-                       ("sh000852", f"{META}/csi1000_daily.parquet")]:
-            parts = [x for x in r.text.split(";") if x.startswith(f"v_{sym}=")][0]
-            parts = parts.split("=", 1)[1].strip('"').split("~")
-            idx_rows.append((p, {"date": target_day, "open": float(parts[5]), "close": float(parts[3]),
-                                 "high": float(parts[33]), "low": float(parts[34]), "volume": float(parts[6]),
-                                 "amount": float(parts[37]) * 1e4 if parts[37] else 0.0}))
-        for p, row in idx_rows:
-            d = pd.read_parquet(p)
-            if not (d["date"] == target_day).any():
-                d = pd.concat([d, pd.DataFrame([row])], ignore_index=True)
-                d["date"] = pd.to_datetime(d["date"])
-                d.sort_values("date").to_parquet(p, index=False)
-    except Exception as e:
-        print(f"[WARN] 指数快照更新失败: {e}", flush=True)
+    # 双通道: qt.gtimg 快照(重试3次) -> web.ifzq 日K兜底(无 amount, 置0)。
+    # 此前仅 WARN 静默落后: 指数落后 -> 状态机/基准用旧数据, 且曾引发
+    # prev_trade_day 错位 -> 除权检测假阳性爆发 (2026-09-09 事故, 见台账第10条)
+    def _idx_from_snapshot(sym: str) -> dict | None:
+        r = None
+        for attempt in range(3):
+            try:
+                r = s.get(f"https://qt.gtimg.cn/q={sym}", timeout=15)
+                r.encoding = "gbk"
+                line = next((x for x in r.text.split(";") if x.startswith(f"v_{sym}=")), None)
+                parts = line.split("=", 1)[1].strip('"').split("~")
+                return {"date": target_day, "open": float(parts[5]), "close": float(parts[3]),
+                        "high": float(parts[33]), "low": float(parts[34]), "volume": float(parts[6]),
+                        "amount": float(parts[37]) * 1e4 if parts[37] else 0.0}
+            except Exception as e:
+                if attempt == 2:
+                    tail = r.text[:80] if r is not None else "no-response"
+                    print(f"[WARN] {sym} 快照解析失败(已重试3次): {e}; resp[:80]={tail!r}", flush=True)
+                time.sleep(2 + 3 * attempt)
+        return None
+
+    def _idx_from_kline(sym: str) -> dict | None:
+        try:
+            r = s.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                      params={"param": f"{sym},day,2026-08-01,{target_day:%Y-%m-%d},20,"}, timeout=15)
+            d = r.json()["data"][sym]
+            bars = [b for b in (d.get("day") or []) if isinstance(b, list) and len(b) >= 6]
+            if not bars or pd.to_datetime(bars[-1][0]) != target_day:
+                return None
+            b = bars[-1]
+            return {"date": target_day, "open": float(b[1]), "close": float(b[2]),
+                    "high": float(b[3]), "low": float(b[4]), "volume": float(b[5]), "amount": 0.0}
+        except Exception as e:
+            print(f"[WARN] {sym} kline 兜底失败: {e}", flush=True)
+            return None
+
+    idx_fail = []
+    for sym, p in [("sh000001", f"{META}/index_daily.parquet"),
+                   ("sh000300", f"{META}/bench_daily.parquet"),
+                   ("sh000852", f"{META}/csi1000_daily.parquet")]:
+        row = _idx_from_snapshot(sym) or _idx_from_kline(sym)
+        if row is None:
+            idx_fail.append(sym)
+            continue
+        d = pd.read_parquet(p)
+        if not (d["date"] == target_day).any():
+            d = pd.concat([d, pd.DataFrame([row])], ignore_index=True)
+            d["date"] = pd.to_datetime(d["date"])
+            d.sort_values("date").to_parquet(p, index=False)
+    if idx_fail:
+        raise RuntimeError(f"指数日线更新失败 {idx_fail} (快照+K线双通道均不可用) —— "
+                           f"指数是仓位状态机/基准的输入, 宁可中止也不带病跑 (run_daily 对本步骤 fatal)")
     # 除权检测: 快照prev_close vs 上一交易日库内收盘 (容差0.5%吸收精度差)
     snap["stored_prev"] = snap["code"].map(prev_rows)
     snap["is_div"] = (snap["stored_prev"].notna()) & ((snap["prev_close"] / snap["stored_prev"] - 1).abs() > 0.005)
     div_codes = snap.loc[snap["is_div"], "code"].tolist()
+    # 保险丝: 正常交易日除权 ~几十只; 超 30% 必是交易日错位型假阳性,
+    # 若继续会整段重拉两千只 -> 数据源限流 -> 空响应 fatal (2026-09-09 事故)
+    if len(div_codes) > max(50, 0.3 * len(snap)):
+        raise RuntimeError(f"除权检测异常: {len(div_codes)}/{len(snap)} 只被标记 (>30%) —— "
+                           f"大概率交易日错位假阳性, 中止以免整段重拉打爆数据源限流")
     print(f"快照 {len(snap)} 只, 检测到除权 {len(div_codes)} 只", flush=True)
     # hfq 折算因子: 库内最后一条 hfq_close / raw_close (后复权因子, 非除权日恒定)
     # hfq = raw × 因子 —— 与 qfq 不同, hfq 历史值永久冻结, 信号可复现 (缺陷④修复)
