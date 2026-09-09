@@ -116,6 +116,22 @@ def update_kline() -> pd.Timestamp:
     prev_rows = store[store["date"] == prev_trade_day].set_index("code")["close"]
 
     s = make_session()
+    # 真实交易日校验 (#18): 节假日(非周末)快照通道无法识别 —— target_day 判定只看
+    # "周几+15:05", 国庆等长假会连写 5 天幻影数据(上一交易日行情标成新日期), 且指数/K线
+    # 同步幻影, verify_store 也发现不了。以指数日K为准: 当天无 bar 即非交易日, 跳过更新。
+    # (已验证: 过去节假日当天查询 ifzq, bars 截至上一交易日且不含当天; 未来日期返回空数组,
+    #  空数组按探测失败处理 -> 按原行为继续, 避免网络问题导致漏掉真实交易日)
+    try:
+        _start = (target_day - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
+        _r = s.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+                   params={"param": f"sh000001,day,{_start},{target_day:%Y-%m-%d},20,"}, timeout=15)
+        _bars = [b for b in (_r.json()["data"]["sh000001"].get("day") or [])
+                 if isinstance(b, list) and len(b) >= 6]
+        if _bars and not any(b[0] == f"{target_day:%Y-%m-%d}" for b in _bars):
+            print(f"{target_day:%Y-%m-%d} 非交易日 (节假日, 指数日K无当日bar), 跳过K线更新", flush=True)
+            return last_idx_day
+    except Exception as e:
+        print(f"[WARN] 交易日探测失败(按交易日继续): {e}", flush=True)
     snap = snapshot_day(s, listed, target_day)
     if snap.empty:
         print("快照获取失败!", flush=True)

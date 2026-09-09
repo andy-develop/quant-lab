@@ -1,9 +1,12 @@
 name: daily-quant
 
 # 每周一至周五 北京时间 16:30 (= UTC 08:30) 运行; 可在 Actions 页面手动触发
+# 注: GitHub 定时任务尽力而为, 实测延迟 0.5~5h; 第二档 21:00 补跑兜底
+# (流水线幂等: 快照已存在则跳过K线更新, 仅重建报告, 补跑无副作用)
 on:
   schedule:
     - cron: '30 8 * * 1-5'
+    - cron: '0 13 * * 1-5'
   workflow_dispatch:
 
 concurrency:
@@ -78,4 +81,19 @@ jobs:
           echo "仓库体积: $((SIZE_KB/1024)) MB"
           if [ "$SIZE_KB" -gt 1048576 ]; then
             echo "::warning::仓库已超过 1GB —— 数据外置到 GitHub Releases (2GB/文件, 不计仓库体积) 或 filter-repo 瘦身历史"
+          fi
+
+      - name: 失败告警 (已有未关闭告警 issue 则不重复, 防刷屏)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="daily-quant 运行失败"
+          N=$(gh issue list -R "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq 'length')
+          if [ "$N" = "0" ]; then
+            gh issue create -R "${{ github.repository }}" -t "$TITLE" \
+              -b "失败 run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} ($(date -u '+%F %T UTC'))" \
+              -b "定时 run 失败意味着当天报告不会更新 (数据/报告口径以最近一次成功 run 为准); 修复后请关闭本 issue。"
+          else
+            echo "已有未关闭的失败告警 issue, 不重复创建"
           fi
