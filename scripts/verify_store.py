@@ -17,6 +17,10 @@ META_REQUIRED = ["stock_basic", "index_daily", "bench_daily", "csi1000_daily"]
 def find_repo():
     if len(sys.argv) > 1:
         return sys.argv[1]
+    # CI/本地通用: 脚本自身位于 <repo>/scripts/ 下, 上一级即仓库根
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.isdir(os.path.join(here, "data", "kline")):
+        return here
     hits = sorted(glob.glob("/Users/andy/WorkBuddy/*/quant-lab"))
     return hits[-1] if hits else None
 
