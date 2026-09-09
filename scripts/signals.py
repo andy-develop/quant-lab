@@ -199,6 +199,8 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
                 偏好强势股中的短期回调 (低吸方向)
       kdj_rev : kdj 的反向对照 (-j_dev), 偏好 J 加速上冲 (追涨方向), 用于检验方向
       quality_kdj5 / quality_kdj10 : kdj 以 5%/10% 微权重并入 quality 合成 (A/B 用)
+      rrf     : Reciprocal Rank Fusion —— 六因子各自单独排整数秩, 得分=Σ 1/(5+rank),
+                等权倒数融合, 与 quality_kdj5 的加权百分比秩合成对照 (A/B 用)
     """
     rk = lambda s: s.groupby(level=1).rank(pct=True)
     mom = rk(df["ret20"])
@@ -218,9 +220,16 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
                     + 0.15 * rk(df["trend_streak"]) + 0.05 * rk(-df["vol20"]) + 0.05 * kdj)
     quality_kdj10 = (0.27 * mom + 0.225 * rk(df["sharpe20"]) + 0.18 * rk(df["win60"])
                      + 0.135 * rk(df["trend_streak"]) + 0.09 * rk(-df["vol20"]) + 0.10 * kdj)
+    # RRF (Reciprocal Rank Fusion, A/B 对照): 六因子各自单独排整数秩(秩1=该因子最优),
+    # 最终得分 = Σ 1/(5+rank)。与 quality_kdj5 的差异: 等权(无 30/25/20/15/5/5 权重)
+    # + 非线性倒数折扣(头部名次差距被压缩, 尾部永不归零)。
+    rint = lambda s, asc=True: s.groupby(level=1).rank(method="average", ascending=asc)
+    rrf = (1.0 / (5 + rint(df["ret20"])) + 1.0 / (5 + rint(df["sharpe20"]))
+           + 1.0 / (5 + rint(df["win60"])) + 1.0 / (5 + rint(df["trend_streak"]))
+           + 1.0 / (5 + rint(df["vol20"], asc=False)) + 1.0 / (5 + rint(df["j_dev"])))
     amihud = mom * rk(1.0 / df["illiq20"])
     return {"momentum": mom, "quality": quality, "quality_kdj5": quality_kdj5,
-            "quality_kdj10": quality_kdj10, "amihud": amihud, "voladj": voladj,
+            "quality_kdj10": quality_kdj10, "rrf": rrf, "amihud": amihud, "voladj": voladj,
             "kdj": kdj, "kdj_rev": rk(-df["j_dev"])}
 
 
