@@ -184,6 +184,7 @@ def signal_momentum(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
 
 SCORE_MODE = "quality_kdj5"    # momentum | quality | quality_kdj5 | quality_kdj10 | amihud | voladj | kdj | kdj_rev —— 2026-09-08 A/B 台账: quality 胜出纯动量/kdj单因子; 晚间混合 A/B: quality_kdj5(开+115.3%/-13.1%/夏普1.45, 全部子区间跑赢基线 quality 开+31.8%) 切默认, kdj10(开+91.6%/关+94.2%) 备选; 回滚改此一行即可
+KDJ_W: float | None = None     # A/B 扫描用: 非 None 时 quality_kdj5 的 kdj 权重取该值(从低波动权重 0.10 匀出, 其余四因子不动); None=生产口径 kdj=0.05
 
 
 def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[str, pd.Series]:
@@ -216,9 +217,11 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
                + 0.10 * rk(-df["vol20"]))
     # quality + kdj 混合: kdj(20日均J-信号日J, 低吸方向)以微权重并入 quality 合成。
     # kdj5: 从最低权重因子(-vol 0.10)匀 0.05 给 kdj; kdj10: 五因子等比缩放×0.9 腾出 0.10。
+    # KDJ_W 非 None 时为权重敏感性扫描模式: kdj 取 KDJ_W, 低波动取 0.10-KDJ_W, 其余四因子不动。
+    kw = 0.05 if KDJ_W is None else float(KDJ_W)
     kdj = rk(df["j_dev"])
     quality_kdj5 = (0.30 * mom + 0.25 * rk(df["sharpe20"]) + 0.20 * rk(df["win60"])
-                    + 0.15 * rk(df["trend_streak"]) + 0.05 * rk(-df["vol20"]) + 0.05 * kdj)
+                    + 0.15 * rk(df["trend_streak"]) + (0.10 - kw) * rk(-df["vol20"]) + kw * kdj)
     quality_kdj10 = (0.27 * mom + 0.225 * rk(df["sharpe20"]) + 0.18 * rk(df["win60"])
                      + 0.135 * rk(df["trend_streak"]) + 0.09 * rk(-df["vol20"]) + 0.10 * kdj)
     # RRF 家族 (A/B 对照):
