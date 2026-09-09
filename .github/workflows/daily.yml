@@ -28,7 +28,7 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
-      - name: 单元测试 (核心逻辑回归, 失败即中止)
+      - name: 单元测试 (核心逻辑回归, 失败即中止; 依赖 run_daily 产物的 8 个测试此时 skip, 产物生成后重跑)
         run: python -m pytest tests/ -q
 
       - name: 每日数据更新 (K线快照 + 除权修复)
@@ -49,6 +49,9 @@ jobs:
 
       - name: 信号扫描 + 组合回测 + 生成报告
         run: python scripts/run_daily.py
+
+      - name: 数据完整性回归 (run_daily 产物已生成, 唤醒此前被 skip 的 8 个测试)
+        run: python -m pytest tests/test_data_integrity.py tests/test_report_payload.py -q
 
       - name: 数据滚动清理
         run: python scripts/trim_data.py

@@ -4,8 +4,12 @@
 顺序颠倒 / 不统一 -> fixup isin 全 miss -> 整段重复行。
 """
 import pandas as pd
+import pytest
 
-import daily_update
+# daily_update 模块级 import requests; 缺 requests 时 importorskip 让本模块
+# 干净 skip, 而不是让整个测试收集 (37 用例) 直接中断
+daily_update = pytest.importorskip("daily_update",
+                                   reason="daily_update 依赖 requests 未安装")
 
 
 def _mk(tmp_path, sub, rows):

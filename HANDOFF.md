@@ -85,6 +85,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 | `7358ac3` | 否决 Git LFS (论证见下) + CI 仓库体积监控(超1GB warning) |
 | `504b07a` | **ST 未来函数修复**: 逐日 isST 替代当前名称过滤; backfill_st.py + 周一 CI 增量刷新; A/B 开模式 +32.2%→+50.9% (修复前口径) |
 | `814f4f3` | **评分因子升级**: 纯动量 → 趋势质量五因子合成 (A/B 三方案, quality 胜出); 开模式回撤 -45.9%→-20.8% |
+| 本轮 | **外部评审修复 + 测试补强**: ①CI 时序——run_daily 后新增"数据完整性回归"步骤, 唤醒此前在门禁时序下永久 skip 的 8 个产物依赖测试 (ST/退市/净值回归形同虚设的问题); ②新增 test_engine_loop.py 10 用例 (T+1对齐/止损/跌停顺延/涨停买不进/整手预算/到期/记账防泄漏, 合成数据端到端跑 run_backtest——引擎主循环首次有覆盖); ③新增 test_signals_regime.py 6 用例 (Z1预热/横盘/Z3多头/Z2回踩降级/Z0逃顶/比率映射); ④test_daily_update_store 改 importorskip (缺 requests 不再团灭整个收集, 模拟验证 50 passed+1 skipped); ⑤运维要点注明本地复现需 Python≥3.12; 37→52 用例全绿。策略说明重写为通俗版 (买什么/买多少/何时卖/怎么执行, 去工程黑话, 保留关键数字) |
 
 ## 5. 关键 A/B 决策记录 (防翻案, 均有数据)
 
@@ -109,6 +110,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 ## 7. 运维要点
 
 - **手动触发**: `gh workflow run daily.yml --ref main`; 监控 `gh run watch <run_id> --repo andy-develop/quant-lab`
+- **本地复现测试**: 需 Python ≥3.12 (numpy==2.5.2 的要求; CI 用 3.13 无此问题), `pytest tests/ --basetemp=<工作区路径>` (默认 /tmp 受沙箱限制时)。缺 requests 时 daily_update 相关用例自动 skip 不阻塞其余测试
 - **文档口径刷新** (改 SCORE_MODE / MAX_HOLD / 回测数据后必跑): `python scripts/refresh_docs.py` 自动更新 HANDOFF 主表格 + 校验文档与代码一致 (`--check-only` 只校验); build_report.main() 开头也内置同一校验, 不一致直接 fail CI
 - **推送绕代理**: `git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 push origin main` (本机代理对 github.com CONNECT 502; 失败时可用 api.github.com 兜底, 参见 quant-lab-ml 的 scripts/api_push.py)
 - **数据校验**: `python skills/quant-lab-data/scripts/verify_store.py` (只读, 查重复/对齐/缺口)

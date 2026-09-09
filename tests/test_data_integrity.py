@@ -1,5 +1,6 @@
-"""真实数据完整性 (本地跑全量; CI 的测试门禁在 run_daily 之前, 生成产物尚不存在时自动 skip):
-ST 逐日过滤 / 退市 out_date 精确剔除 / 状态机值域 / 净值起点归一。
+"""真实数据完整性 (本地跑全量; CI 前置门禁先于 run_daily 时自动 skip,
+run_daily 之后的"数据完整性回归"步骤会真正执行): ST 逐日过滤 / 退市 out_date
+精确剔除 / 状态机值域 / 净值起点归一。
 """
 import os
 
@@ -12,7 +13,7 @@ from engine import BASE
 def _require(*paths):
     missing = [p for p in paths if not os.path.exists(p)]
     if missing:
-        pytest.skip(f"生成产物不存在 (CI 测试门禁先于 run_daily, 本地全量跑): {missing}")
+        pytest.skip(f"生成产物不存在 (CI 前置门禁先于 run_daily, 产物生成后重跑): {missing}")
 
 
 @pytest.fixture(scope="module")
