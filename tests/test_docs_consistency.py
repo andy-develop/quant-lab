@@ -12,8 +12,14 @@ class TestDocConsistency:
         refresh_docs.check_doc_consistency()   # 不抛即通过
 
     def test_main_table_structure(self):
-        t = refresh_docs.render_main_table()
+        """合成 KPI 数据测渲染逻辑 (不依赖本地生成产物, CI 可跑)。"""
+        k = {"on": {"ret": 1.141, "maxdd": -0.131, "sharpe": 1.44, "trades": 460,
+                    "winrate": 0.422, "start": "2023-09-01", "end": "2026-09-08"},
+             "off": {"ret": 0.521, "maxdd": -0.374, "sharpe": 0.60, "trades": 849,
+                     "winrate": 0.391, "start": "2023-09-01", "end": "2026-09-08"}}
+        t = refresh_docs.render_main_table(k)
         assert "开 (默认)" in t and "|" in t
+        assert "+114.1%" in t and "1.44" in t
 
     def test_handoff_auto_kpi_anchor_unique(self):
         handoff = (ROOT / "HANDOFF.md").read_text()
