@@ -66,8 +66,9 @@ def render_main_table(k: dict | None = None) -> str:
             "|---|---|---|---|---|---|")
     note = ("\n\n> 数字由 `scripts/refresh_docs.py` 从 data/meta{,_no} 自动生成, "
             "严禁手改; 夏普口径 √244 与报告前端一致。")
+    # note 必须在锚点【内】: 写在锚点外会因替换只覆盖锚点区间而每次运行残留累积
     return (f"{ANNO_START} (refresh_docs.py 生成, 严禁手改) -->\n{head}\n"
-            f"{row('开 (默认)', k['on'])}\n{row('关', k['off'])}\n{ANNO_END}{note}")
+            f"{row('开 (默认)', k['on'])}\n{row('关', k['off'])}\n{note}\n{ANNO_END}")
 
 
 def refresh_handoff() -> bool:

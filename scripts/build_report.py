@@ -43,7 +43,10 @@ def _shared():
     return bench, bench1000, sigs
 
 
-def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
+def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years: int | None = None):
+    """window_years=None -> 回测全期; 数字 -> 近N年窗口。
+    2026-09-09 起单一全期 payload: 区间切换全部由前端切片完成, 切片起点重归一 ¥100万
+    (消除此前 y1/y3 双 payload 归一常数不同导致的基准对比细微差异与语义模糊)"""
     eq = pd.read_csv(f"{meta_dir}/equity.csv", parse_dates=["date"]).set_index("date")["equity"]
     bench = bench.reindex(eq.index).ffill()
     bench1000 = bench1000.reindex(eq.index).ffill()
@@ -55,10 +58,13 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
     hold["entry_date"] = pd.to_datetime(hold["entry_date"])
 
     last_day = eq.index[-1]
-    # ---- 报告窗口: 去年同期(自然日)起, 如今天 2026-09-08 -> 2025-09-08 ----
-    win_start = last_day - pd.DateOffset(years=window_years)
-    # 回测起点 2023-09-01: 近3年窗口可能超出回测范围, 落到实际可用首日
-    win_start = max(win_start, eq.index[0])
+    if window_years is None:          # 全期: 不截断
+        win_start = eq.index[0]
+    else:
+        # ---- 报告窗口: 去年同期(自然日)起, 如今天 2026-09-08 -> 2025-09-08 ----
+        win_start = last_day - pd.DateOffset(years=window_years)
+        # 回测起点 2023-09-01: 近3年窗口可能超出回测范围, 落到实际可用首日
+        win_start = max(win_start, eq.index[0])
     if eq.index[0] < win_start:
         eq = eq[eq.index >= win_start]
         bench = bench.reindex(eq.index).ffill()
@@ -82,6 +88,7 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
     sell_plan = []
     hold_last = hold[hold["date"] == last_day].set_index("code")
     ps_file = f"{meta_dir}/pending_sells.parquet"
+    ps = pd.DataFrame(columns=["code", "reason"])   # 显式初始化: 文件缺失时 risk 段不依赖短路逻辑保命
     if os.path.exists(ps_file):
         ps = pd.read_parquet(ps_file)
         for _, r in ps.iterrows():
@@ -99,7 +106,7 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
 
     # ---- 卖出风险预警: 未挂单但距离触发条件很近的持仓 ----
     risk_list = []
-    ps_codes_all = set(ps["code"]) if (os.path.exists(ps_file) and "code" in ps.columns) else set()
+    ps_codes_all = set(ps["code"]) if "code" in ps.columns else set()
     pending_codes = {c for c in ps_codes_all if c in hold_last.index}
     try:
         codes = [c for c in hold_last.index if c not in pending_codes]
@@ -150,7 +157,7 @@ def build_payload(meta_dir, mode, bench, bench1000, sigs, window_years=1):
     # ---- JSON 载荷 ----
     return {
         "mode": mode,
-        "win_label": f"近{window_years}年",
+        "win_label": "回测全期" if window_years is None else f"近{window_years}年",
         "generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
         "last_day": str(last_day.date()),
         "start_day": str(start_day.date()),
@@ -185,26 +192,25 @@ def main():
     bench, bench1000, sigs = _shared()
     off_dir = f"{BASE}/data/meta_no"
     has_off = os.path.exists(f"{off_dir}/equity.csv")
-    # 双净值窗口 × 双仓位口径: MODES[y1/y3][on/off], 前端两组按钮正交切换
-    windows = (("y1", 1), ("y3", 3))
-    modes = {}
-    for wname, wy in windows:
-        p_on = build_payload(META, "on", bench, bench1000, sigs, window_years=wy)
-        if has_off:
-            p_off = build_payload(off_dir, "off", bench, bench1000, sigs, window_years=wy)
-        else:
-            p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
-        modes[wname] = {"on": p_on, "off": p_off}
+    # 单一全期 payload × 双仓位口径: MODES["y3"][on/off]。
+    # 区间切换(近一周~近三年)全部由前端从全期切片, 切片起点重归一 ¥100万 —— 归一语义唯一
+    modes = {"y3": {}}
+    p_on = build_payload(META, "on", bench, bench1000, sigs, window_years=None)
+    if has_off:
+        p_off = build_payload(off_dir, "off", bench, bench1000, sigs, window_years=None)
+    else:
+        p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
+    modes["y3"] = {"on": p_on, "off": p_off}
 
     html = render_html(modes)
     os.makedirs(f"{BASE}/report", exist_ok=True)
     out = f"{BASE}/report/index.html"
     with open(out, "w") as f:
         f.write(html)
-    n_on = len(modes["y1"]["on"]["trades"])
-    n_off = len(modes["y1"]["off"]["trades"])
-    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 近1年 开:{n_on}笔/关:{n_off}笔; 近3年 "
-          f"开:{len(modes['y3']['on']['trades'])}笔/关:{len(modes['y3']['off']['trades'])}笔)", flush=True)
+    n_on = len(p_on["trades"])
+    n_off = len(p_off["trades"])
+    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 全期 开:{n_on}笔/关:{n_off}笔; "
+          f"区间切换由前端切片)", flush=True)
     return modes
 
 
@@ -223,6 +229,28 @@ def _kpi_block_html() -> str:
             f"评分模式 {DOC_SCORE_MODE} · 夏普口径 √244</p>")
 
 
+def _st_banner_html() -> str:
+    """ST 数据新鲜度横幅: 落后 >7 天在报告顶部醒目展示 (防 baostock 静默失败链无人察觉)。
+    注: signals.run_scan 在 lag>20 时已 fatal, 此横幅覆盖 8~20 天的中间地带 + 报告存档可读性。"""
+    f = f"{BASE}/data/meta/st_history.parquet"
+    try:
+        if not os.path.exists(f):
+            return ('<div style="background:#FDE8E8;border:1px solid #C0392B;border-radius:10px;'
+                    'padding:10px 14px;font-size:13px;color:#7B241C;margin-bottom:14px">'
+                    '<b>⚠ ST 数据文件缺失</b> —— 新戴帽个股可能未被过滤, 回测结果不可信。</div>')
+        st_last = pd.to_datetime(pd.read_parquet(f, columns=["date"])["date"]).max()
+        lag = (pd.Timestamp.today().normalize() - st_last).days
+        if lag > 7:
+            return (f'<div style="background:#FDE8E8;border:1px solid #C0392B;border-radius:10px;'
+                    f'padding:10px 14px;font-size:13px;color:#7B241C;margin-bottom:14px">'
+                    f'<b>⚠ ST 数据截至 {st_last:%Y-%m-%d} (已落后 {lag} 天)</b> —— '
+                    f'期间新戴帽个股仍按正常股参与回测, 结果可能失真; '
+                    f'请先运行 backfill_st.py incw/incmerge 刷新。</div>')
+    except Exception as e:
+        print(f"[WARN] ST 横幅生成失败: {e}", flush=True)
+    return ""
+
+
 def render_html(P):
     data_json = json.dumps(P, ensure_ascii=False)
     doc = (STRAT_DOC
@@ -231,7 +259,8 @@ def render_html(P):
     return (HTML_TEMPLATE
             .replace("__DATA__", data_json)
             .replace("__STRAT_DOC__", doc)
-            .replace("__MAX_HOLD__", str(MAX_HOLD)))
+            .replace("__MAX_HOLD__", str(MAX_HOLD))
+            .replace("__ST_BANNER__", _st_banner_html()))
 
 
 STRAT_DOC = """
@@ -361,7 +390,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
     <div class="mode-note">大盘状态机 Z0–Z3 · 锚定上证</div>
   </div>
 </div>
-<div class="warn" style="margin-top:14px" id="warnBar"></div>
+__ST_BANNER__<div class="warn" style="margin-top:14px" id="warnBar"></div>
 
 <div class="tabs" id="rangeTabs">
   <div class="tab" data-n="5">近一周</div>
@@ -369,7 +398,7 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
   <div class="tab" data-n="63">近三月</div>
   <div class="tab" data-n="122">近六月</div>
   <div class="tab on" data-n="244">近一年</div>
-  <div class="tab" data-w="y3">近三年</div>
+  <div class="tab" data-n="0">近三年</div>
 </div>
 <div class="kpis card"><h2>核心指标对比 <span class="note">(所选区间 · 沪深300为同期买入持有)</span></h2><table id="kpiTable"></table></div>
 
@@ -401,8 +430,8 @@ __STRAT_DOC__
 </div>
 <script>
 const MODES = __DATA__;
-let curWin = 'y1';         // 净值窗口: y1=近1年 / y3=近3年 (由区间 tabs 驱动)
-let D = MODES[curWin].on;  // 默认: 近1年 · 开启仓位控制
+let curWin = 'y3';          // 唯一窗口: 回测全期 payload (区间切换由 rangeN 前端切片)
+let D = MODES[curWin].on;  // 默认: 近一年切片 · 开启仓位控制
 let curMode = 'on';
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
@@ -436,15 +465,15 @@ function toggleTrade(){
   document.getElementById('tradeToggle').textContent = tradeOpen ? '收起明细 ▴' : '展开明细 ▾';
 }
 
-// ---------- 区间切换 (近一周~近一年在 y1 窗口内切片; 近三年切到 y3 窗口看全量) ----------
+// ---------- 区间切换: 统一从全期 payload 切"最后 N+1 个交易日", 切片起点重归一 ¥100万 ----------
+// (策略与三条基准同一切片起点归一, 归一语义唯一; 近三年=全期, 切片起点即 payload 起点为 no-op)
 let rangeN = 244;   // 默认近一年
 document.getElementById('rangeTabs').addEventListener('click', e => {
   const t = e.target;
-  if(!t.dataset.n && !t.dataset.w) return;
+  if(t.dataset.n === undefined) return;
   document.querySelectorAll('#rangeTabs .tab').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');
-  if(t.dataset.w){ curWin = t.dataset.w; rangeN = 0; }   // 近三年: y3 窗口全量
-  else           { curWin = 'y1';     rangeN = +t.dataset.n; }
+  rangeN = +t.dataset.n;
   D = MODES[curWin][curMode];
   renderAll();
 });
@@ -452,8 +481,10 @@ document.getElementById('rangeTabs').addEventListener('click', e => {
 function slice(){
   const n = rangeN === 0 ? D.dates.length : rangeN + 1;
   const s = Math.max(0, D.dates.length - n);
-  return {dates: D.dates.slice(s), equity: D.equity.slice(s), bench: D.bench.slice(s),
-          bench1000: (D.bench1000 || D.bench).slice(s), start: D.dates[s]};
+  const renorm = a => { const x = a.slice(s); const k = x[0] ? 1e6/x[0] : 1;
+                        return k === 1 ? x : x.map(v => v*k); };
+  return {dates: D.dates.slice(s), equity: renorm(D.equity), bench: renorm(D.bench),
+          bench1000: renorm(D.bench1000 || D.bench), start: D.dates[s]};
 }
 
 function kpis(){
@@ -593,7 +624,7 @@ function renderAll(){
 }
 
 document.getElementById('sub').textContent =
-  `生成于 ${D.generated} · 默认区间近一年, 可切近三年(回测全期) · 起点归一 ¥100万 · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
+  `生成于 ${D.generated} · 区间切换=回测全期切片(切片起点重归一 ¥100万) · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
 document.getElementById('warnBar').innerHTML = WARN_ON;
 document.getElementById('foot').innerHTML = FOOT_ON;
 

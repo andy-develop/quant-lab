@@ -115,17 +115,40 @@ def merge_parts() -> None:
     _save(df, "merge")
 
 
+def _first_store_dates() -> dict[str, str]:
+    """每只股票在K线库中的最早交易日(归一为 baostock 代码) —— 新股全量回补起点"""
+    first: dict[str, str] = {}
+    for f in glob.glob(f"{BASE}/data/kline/hfq_*.parquet") + glob.glob(f"{BASE}/data/kline/incremental/hfq_*.parquet"):
+        t = pd.read_parquet(f, columns=["code", "date"])
+        t = pd.DataFrame({"code": norm_code(t["code"]),
+                          "date": pd.to_datetime(t["date"]).dt.strftime("%Y-%m-%d")})
+        for c, d in t.groupby("code")["date"].min().items():
+            if c not in first or d < first[c]:
+                first[c] = d
+    return first
+
+
 def incremental_worker(wid: int, total: int) -> None:
-    """增量分片: 各 worker 只拉 [最新日期-10天, 今天] 的自己那份"""
+    """增量分片: 宇宙=K线库全集(含新股); 老股只拉 [最新日期-10天, 今天],
+    未入库新股从其在K线库的最早日期全量回补 (否则新股永远进不了 st_history)"""
     hist = pd.read_parquet(OUT)
     last = pd.to_datetime(hist["date"]).max()
-    start = (last - pd.Timedelta(days=10)).strftime("%Y-%m-%d")  # 10天重叠, 覆盖节假日+baostock延迟
-    mine = sorted(hist["code"].unique())[wid::total]
-    print(f"[st-inc-{wid}] {len(mine)} 只, 起点 {start}", flush=True)
+    start_known = (last - pd.Timedelta(days=10)).strftime("%Y-%m-%d")  # 10天重叠, 覆盖节假日+baostock延迟
+    known = set(hist["code"])
+    universe = all_store_codes()
+    starts: dict[str, str] = {c: start_known for c in universe}
+    missing = [c for c in universe if c not in known]
+    if missing:
+        fdates = _first_store_dates()
+        for c in missing:
+            starts[c] = fdates.get(c, start_known)
+    mine = universe[wid::total]
+    print(f"[st-inc-{wid}] {len(mine)} 只 (其中新股全量回补 {sum(1 for c in mine if c in set(missing))} 只), "
+          f"老股起点 {start_known}", flush=True)
     bs.login()
     frames: list[pd.DataFrame] = []
     for k, code in enumerate(mine):
-        df = query(bs, code, start, END)
+        df = query(bs, code, starts[code], END)
         if df is not None:
             df.insert(0, "code", code)
             frames.append(df)

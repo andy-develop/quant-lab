@@ -94,7 +94,9 @@ def build_indicators(hfq: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
 
     # ---- 评分因子 (2026-09-08 引入, 仅影响同日候选的买入优先级, 不改选股条件) ----
     df["vol20"] = groll(df["ret"], 20, "std")                       # 20日日收益波动率
-    df["sharpe20"] = df["ret20"] / (df["vol20"] * np.sqrt(20))      # 20日夏普 (区间收益/区间波动)
+    # 20日夏普 —— 全项目唯一 sharpe 定义 (此前 signal_scores 内有第二套 ret20/vol20 写法, 秩等价但易混淆);
+    # vol20=0(20日收益恒定, 极罕见) -> NaN, 评分/横截面排名自然剔除
+    df["sharpe20"] = (df["ret20"] / df["vol20"].where(df["vol20"] > 0)) / np.sqrt(20)
     df["win60"] = groll((df["ret"] > 0).astype(float), 60, "mean")  # 60日上涨天数占比
     # 趋势一致性: MA5>MA10>MA20>MA60 的连续天数 (bool 段内计数, 断点归零)
     bull = (df["ma5"] > df["ma10"]) & (df["ma10"] > df["ma20"]) & (df["ma20"] > df["ma60"])
@@ -200,8 +202,8 @@ def signal_scores(df: pd.DataFrame, idx_vol: pd.Series | None = None) -> dict[st
     """
     rk = lambda s: s.groupby(level=1).rank(pct=True)
     mom = rk(df["ret20"])
-    sharpe_raw = df["ret20"] / df["vol20"].where(df["vol20"] > 0)   # vol20=0 -> NaN
-    voladj = rk(sharpe_raw)
+    voladj = rk(df["sharpe20"])   # 调整后动量: 秩上 ≡ ret20/vol20 (sqrt(20) 是年化常数不改排序);
+                                  # ×当日指数20日波动率亦不改同日横截面排序, 保留乘法为公式忠实
     if idx_vol is not None:
         voladj = voladj * pd.Series(df.index.get_level_values(1).map(idx_vol).to_numpy(), index=df.index)
     quality = (0.30 * mom
@@ -241,11 +243,24 @@ def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.D
     st = pd.read_parquet(f"{BASE}/data/meta/st_history.parquet")
     st_last = pd.to_datetime(st["date"]).max()
     lag = (pd.Timestamp.today().normalize() - st_last).days
+    if lag > 20:
+        # 静默失败链防护: baostock 连续数周不可用时, 新戴帽股会持续漏过滤且回测失真无人察觉
+        raise SystemExit(f"FATAL: st_history 已 {lag} 天未更新(最新 {st_last:%Y-%m-%d}) —— "
+                         f"新戴帽个股漏过滤风险不可接受, 先跑 backfill_st.py incw/incmerge 刷新再扫描")
     if lag > 10:
-        print(f"WARN: st_history 已 {lag} 天未更新(最新 {st_last:%Y-%m-%d}), 跑 backfill_st.py inc 刷新", flush=True)
-    # ST/退市整理 过滤改为逐日状态: 当前名称过滤是未来函数(戴帽前的历史被误删、摘帽股被误留)。
-    # isST==1 的 (code,date) 行在指标计算后剔除; 名称当前含"退"的股票(退市整理期)整段剔除 —— 终态剔除, 保守方向。
-    retire = set(basic[basic["name"].str.contains("退", na=False)]["secid"])
+        print(f"WARN: st_history 已 {lag} 天未更新(最新 {st_last:%Y-%m-%d}), "
+              f"尽快跑 backfill_st.py inc 刷新", flush=True)
+    # ST/退市 过滤 (2026-09-08 晚升级):
+    # 1) ST: 逐日 isST 状态 (st_history.parquet), 消除"当前名称过滤"的未来函数
+    # 2) 退市: out_date 已知 -> 精确到行, 仅剔 [out_date-30天, ∞) —— 健康期信号保留, 回测更真实;
+    #    无 out_date 但名称含"退"(退市整理期未摘牌/字段缺失) -> 兜底整段剔除 (保守方向)
+    if "out_date" in basic.columns:
+        _cut = pd.to_datetime(basic["out_date"], errors="coerce") - pd.Timedelta(days=30)
+        cut_map = pd.Series(_cut.to_numpy(), index=basic["secid"]).dropna()
+    else:
+        cut_map = pd.Series(dtype="datetime64[ns]")
+    retire = set(basic.loc[~basic["secid"].isin(cut_map.index)
+                           & basic["name"].str.contains("退", na=False), "secid"])
     print(f"K线加载: hfq {len(hfq):,} 行 / raw {len(raw):,} 行 / 股票 {hfq['code'].nunique()}", flush=True)
 
     df = build_indicators(hfq, raw)
@@ -258,10 +273,16 @@ def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.D
                           on=["code", "date"], how="left")
     bad = idx_df["_bad"].fillna(False).astype(bool).to_numpy()
     n_st_rows = int(bad.sum())
+    # 退市行剔除: (code,date) 中 date >= cut(out_date-30天) 的行, 未匹配到 cut_map 的为 NaT(保留)
+    _dates = df.index.get_level_values(1).to_numpy()
+    _cut_for = pd.Series(df.index.get_level_values(0)).map(cut_map).to_numpy()
+    bad_retire = pd.notna(_cut_for) & (_dates >= _cut_for)
+    n_retire_rows = int(bad_retire.sum())
     in_retire = df.index.get_level_values(0).isin(retire)
-    df = df[~bad & ~in_retire]
-    print(f"ST 过滤: 剔除 ST日行 {n_st_rows:,} / 退市整理股 {len(retire)} 只, "
-          f"剩余 {len(df):,} 行 / {df.index.get_level_values(0).nunique()} 只", flush=True)
+    df = df[~bad & ~bad_retire & ~in_retire]
+    print(f"ST 过滤: 剔除 ST日行 {n_st_rows:,} / 退市行 {n_retire_rows:,}(out_date精确) / "
+          f"整段剔除股 {len(retire)} 只(无out_date兜底), 剩余 {len(df):,} 行 / "
+          f"{df.index.get_level_values(0).nunique()} 只", flush=True)
     print("指标计算完成", flush=True)
     print(f"[计时] 加载+指标+过滤 {time.time()-t0:.0f}s", flush=True)
 

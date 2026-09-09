@@ -86,7 +86,8 @@ def run_backtest(start: str | None = None, use_regime: bool = True,
     cal = piv["close"].index
     cal = cal[cal >= pd.Timestamp(start)] if start else cal
     start = start or str(cal[0].date())
-    out_dir = out_dir or f"{BASE}/data/meta"
+    # 默认目录随 use_regime 走: 开->meta / 关->meta_no (此前恒为 meta, 关口径漏传参即覆盖生产数据)
+    out_dir = out_dir or f"{BASE}/data/{'meta' if use_regime else 'meta_no'}"
     os.makedirs(out_dir, exist_ok=True)
 
     qo, qc = piv["open"], piv["close"]        # hfq 口径 (连续, 涨跌停判定/成交/估值)
