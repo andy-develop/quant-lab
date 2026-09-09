@@ -17,6 +17,7 @@ def _require(*paths):
 
 @pytest.fixture(scope="module")
 def sigs():
+    _require(f"{BASE}/data/meta/signals.parquet")
     df = pd.read_parquet(f"{BASE}/data/meta/signals.parquet")
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     return df
@@ -55,6 +56,7 @@ class TestDelistFilter:
 
 class TestRegime:
     def test_target_ratio_in_range(self):
+        _require(f"{BASE}/data/meta/market_regime.parquet")
         r = pd.read_parquet(f"{BASE}/data/meta/market_regime.parquet")
         assert r["target_ratio"].dropna().between(0, 1).all()
         assert len(r) > 100
