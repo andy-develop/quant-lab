@@ -13,6 +13,10 @@ from build_report import _shared, build_payload
 
 @pytest.fixture(scope="module")
 def modes():
+    import os
+    need = [f"{engine.BASE}/data/meta/equity.csv", f"{engine.BASE}/data/meta/signals.parquet"]
+    if not all(os.path.exists(p) for p in need):
+        pytest.skip("生成产物不存在 (CI 测试门禁先于 run_daily, 本地全量跑)")
     bench, bench1000, sigs = _shared()
     off_dir = f"{engine.BASE}/data/meta_no"
     p_on = build_payload(f"{engine.BASE}/data/meta", "on", bench, bench1000, sigs,

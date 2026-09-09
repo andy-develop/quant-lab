@@ -1,10 +1,18 @@
-"""真实数据完整性 (CI checkout 自带 data/, 本地跑同样有效):
+"""真实数据完整性 (本地跑全量; CI 的测试门禁在 run_daily 之前, 生成产物尚不存在时自动 skip):
 ST 逐日过滤 / 退市 out_date 精确剔除 / 状态机值域 / 净值起点归一。
 """
+import os
+
 import pandas as pd
 import pytest
 
 from engine import BASE
+
+
+def _require(*paths):
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        pytest.skip(f"生成产物不存在 (CI 测试门禁先于 run_daily, 本地全量跑): {missing}")
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +63,7 @@ class TestRegime:
 class TestEquity:
     @pytest.mark.parametrize("meta_dir,tag", [("meta", "开"), ("meta_no", "关")])
     def test_starts_at_1m(self, meta_dir, tag):
+        _require(f"{BASE}/data/{meta_dir}/equity.csv")
         eq = pd.read_csv(f"{BASE}/data/{meta_dir}/equity.csv")
         assert eq["equity"].iloc[0] == pytest.approx(1_000_000.0), f"{tag}口径起点未归一 100 万"
         assert len(eq) > 100
