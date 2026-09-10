@@ -1,7 +1,8 @@
 #!/bin/zsh
-# 将 quant-lab 报告原址更新到 HSK 文件托管 (https://kpqv8z.gicp.fun)
+# 将 quant-lab 报告原址更新到 HSK 文件托管 (https://qagzu5.gicp.fun)
 # 密钥优先级: 环境变量 HSK_API_KEY (CI/GitHub Actions) > ~/.hsk/api_key.json (本地已配置)
-# 资源 ID: 环境变量 HSK_RESOURCE_ID, 缺省 1788744899319110368
+# 资源 ID: 环境变量 HSK_RESOURCE_ID, 缺省 1789011890242319035
+# (旧资源 1788744899319110368/kpqv8z.gicp.fun 于 2026-09-10 被平台禁用更新 code 11301002, 已弃用)
 
 HSK="${HSK_CLI:-/Users/andy/.workbuddy/binaries/node/workspace/node_modules/.bin/hsk-cli}"
 REPORT="$(cd "$(dirname "$0")/.." && pwd)/report/index.html"

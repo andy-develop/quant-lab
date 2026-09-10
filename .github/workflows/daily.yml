@@ -15,6 +15,7 @@ concurrency:
 
 permissions:
   contents: write
+  issues: write   # 失败告警自动开 issue 需要
 
 jobs:
   run:
