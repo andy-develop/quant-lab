@@ -31,10 +31,11 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 | `backfill_hfq.py` | hfq 后复权回补 (2023-01 起, 26 分片) |
 | `backfill_st.py` | **逐日 ST 状态回补/增量/合并** (isST 字段, → st_history.parquet) |
 | `daily_update.py` | 每日快照增量 + 除权修复(fixup) + 指数快照; `load_store()` 统一读库 |
-| `signals.py` | 指标计算、动量选股、八套评分(momentum/quality/quality_kdj5/kdj10/amihud/voladj/kdj/kdj_rev)、大盘状态机 Z0-Z3 |
-| `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir, max_hold)`; 止损-8%/持有max_hold日/放量滞涨/Z0清仓 |
-| `run_daily.py` | 编排: 双口径回测 → data/meta(开) + data/meta_no(关); 关键步骤失败即中止 |
-| `build_report.py` | 静态报告: 单一全期 payload, 区间切换(近一周~近三年)由前端切片+切片起点重归一 ¥100万; 右上角"仓位控制 开/关"切换; ST 数据落后>7天顶部红色横幅 |
+| `signals.py` | 指标计算、动量选股、八套评分(momentum/quality/quality_kdj5/kdj10/amihud/voladj/kdj/kdj_rev/lgbm)、大盘状态机 Z0-Z3 |
+| `lgbm_rank.py` | **量化黑盒**: LightGBM lambdarank 排序模型 — 价量特征~25维 + 5日前瞻收益分位标签, walk-forward 每42交易日重训, 全历史 OOS 分数 → lgbm_scores.parquet; `update_scores()` 增量补算新日期; Rank IC 日志 |
+| `engine.py` | 回测引擎 `run_backtest(use_regime, out_dir, max_hold, sig_file)`; 止损-8%/持有max_hold日/放量滞涨/Z0清仓 |
+| `run_daily.py` | 编排: 动量双口径回测(meta/meta_no) → 黑盒模型打分+双口径回测(meta_bb/meta_no_bb, 非 fatal) → 报告; 关键步骤失败即中止 |
+| `build_report.py` | 静态报告: 双页架构(动量策略/量化黑盒, 同布局同表结构, 独立数据 `__DATA__`/`__DATA_BB__` + `bb_` id 前缀); 单一全期 payload, 区间切换由前端切片+重归一 ¥100万; 右上角"仓位控制 开/关"; ST 落后>7天红色横幅 |
 | `trim_data.py` | 数据滚动清理 |
 | `upload_hsk.sh` | 报告上传坚果云托管 |
 
@@ -103,6 +104,8 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 
 ## 6. 已知限制与遗留事项
 
+- **量化黑盒 (LightGBM) 首版回测显著弱于动量评分** (2026-09-10 上线): 同选股条件, 仅替换同日候选打分排队 → 开模式 +6.5%/-34.2% (动量 quality_kdj5: +114.1%/-13.1%); 关模式 -82.2%/-84.3%。要点: ①分数是 walk-forward 纯样本外 (每42交易日重训, 无未来函数), 与动量的样本内调权不可直接同台比较; ②lambdarank 优化的是 5 日收益分位的排序一致性, 不是策略收益; ③OOS 排序能力 (Rank IC 见 CI 日志) 转化为收益有折价。结论: 黑盒线继续观察迭代, 生产默认仍是动量 quality_kdj5; 黑盒不实盘
+- **lgbm_scores.parquet 仓库体积策略** (~10MB, 每日全文件重写): CI 仅每月 1 号提交基线快照 (daily.yml git add 条件), 中间日期 run_daily 内存增量补算 (确定性可复现); 若仓库增速异常, 可改为每季度或把 scores 改为分年分片
 - **quality_kdj5 评分无样本外验证**: 单窗口 (2023-2026) 回测 + 排序路径依赖敏感(见台账第7条反方观点), 建议半年后滚动窗口复核; 若极端动量行情可能跑输纯动量 (`SCORE_MODE` 一行可回滚)
 - **slot 变紧后 100 股零头买入**: 华锦/楚天龙/赤天龙出现单笔 ~5000 元门槛以下买入, 可考虑最低金额门槛 (需 A/B)
 - ~~退市整理股整段剔除~~ → 已修复 (2026-09-09 台账第9条③): out_date 精确到行, 健康期保留

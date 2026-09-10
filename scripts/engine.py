@@ -67,8 +67,8 @@ def load_wide() -> dict[str, pd.DataFrame]:
     return piv
 
 
-def load_signals_wide() -> tuple[dict[str, pd.DataFrame], pd.Series]:
-    sig = pd.read_parquet(f"{BASE}/data/meta/signals.parquet")
+def load_signals_wide(sig_file: str | None = None) -> tuple[dict[str, pd.DataFrame], pd.Series]:
+    sig = pd.read_parquet(sig_file or f"{BASE}/data/meta/signals.parquet")
     sig["date"] = pd.to_datetime(sig["date"])
     # 同一(code,date)去重取分最高
     sig = sig.sort_values("score", ascending=False).drop_duplicates(["code", "date"])
@@ -80,9 +80,10 @@ def load_signals_wide() -> tuple[dict[str, pd.DataFrame], pd.Series]:
 
 
 def run_backtest(start: str | None = None, use_regime: bool = True,
-                 out_dir: str | None = None, max_hold: int = MAX_HOLD) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                 out_dir: str | None = None, max_hold: int = MAX_HOLD,
+                 sig_file: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     piv = load_wide()
-    sig_w, names = load_signals_wide()
+    sig_w, names = load_signals_wide(sig_file)
     cal = piv["close"].index
     cal = cal[cal >= pd.Timestamp(start)] if start else cal
     start = start or str(cal[0].date())

@@ -38,7 +38,7 @@ def _mk_engine(monkeypatch, tmp_path, flags, sigs):
     monkeypatch.setattr(engine, "load_wide", lambda: piv)
     sw = sigs.pivot(index="date", columns="code", values="score")
     names = sigs.drop_duplicates("code").set_index("code")["name"]
-    monkeypatch.setattr(engine, "load_signals_wide", lambda: ({"strat": sw}, names))
+    monkeypatch.setattr(engine, "load_signals_wide", lambda sig_file=None: ({"strat": sw}, names))
     return tmp_path
 
 

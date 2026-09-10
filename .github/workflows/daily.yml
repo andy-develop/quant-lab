@@ -63,7 +63,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet data/meta/st_history.parquet
+          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet data/meta/st_history.parquet data/meta/lgbm_model.txt data/meta/lgbm_model_meta.json
+          # lgbm_scores.parquet 体积 ~10MB 且每日全文件重写 —— parquet 不可增量追加,
+          # 每天提交会让仓库以 10MB/天 膨胀。策略: 仅每月 1 号刷新基线快照 (10MB/月);
+          # 中间日期的分数由 run_daily 每次内存增量补算 (walk-forward 确定性, 结果可复现)。
+          if [ "$(date -u +%-d)" = "1" ]; then git add data/meta/lgbm_scores.parquet; fi
           git diff --cached --quiet || git commit -m "data: $(date -u +'%Y-%m-%d')"
           git push
 

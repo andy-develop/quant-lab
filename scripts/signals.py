@@ -251,9 +251,10 @@ def exit_flags(df: pd.DataFrame) -> pd.Series:
     return shrink
 
 
-def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.DataFrame:
-    """score_mode/out_file: A/B 用 —— 指定本次扫描的评分模式与信号输出路径;
-    默认 None 走生产口径 (SCORE_MODE / data/meta/signals.parquet), 行为不变。"""
+def run_scan(score_mode: str | None = None, out_file: str | None = None,
+             strat: str = "momentum") -> pd.DataFrame:
+    """score_mode/out_file/strat: 多策略 A/B 与黑盒页用 —— 指定本次扫描的评分模式、
+    信号输出路径与策略名; 默认 None 走生产口径 (SCORE_MODE / data/meta/signals.parquet / momentum)。"""
     mode = score_mode or SCORE_MODE
     out_file = out_file or f"{BASE}/data/meta/signals.parquet"
     t0 = time.time()
@@ -311,7 +312,19 @@ def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.D
     idx_close = pd.read_parquet(f"{BASE}/data/meta/index_daily.parquet").set_index("date")["close"].sort_index()
     idx_vol20 = idx_close.pct_change().rolling(20).std()
     sig_c, _ = signal_momentum(df)
-    score_c = signal_scores(df, idx_vol=idx_vol20)[mode]
+    if mode == "lgbm":
+        # 量化黑盒: LightGBM 排序模型分数 (lgbm_rank.walk-forward 产出, 见 scripts/lgbm_rank.py)。
+        # 选股条件与动量策略完全一致, 仅替换「同日候选谁先买」的打分排队。
+        sc = pd.read_parquet(f"{BASE}/data/meta/lgbm_scores.parquet")
+        sc["date"] = pd.to_datetime(sc["date"])
+        _key = pd.MultiIndex.from_arrays([sc["code"].to_numpy(), sc["date"].to_numpy()])
+        score_c = pd.Series(sc["score"].to_numpy(), index=_key).reindex(df.index)
+        n_miss = int(score_c.isna().sum())
+        if n_miss:
+            print(f"WARN: lgbm 分数缺失 {n_miss:,} 行 (应为 0; 以 0 分兜底排队末位)", flush=True)
+        score_c = score_c.fillna(0.0)
+    else:
+        score_c = signal_scores(df, idx_vol=idx_vol20)[mode]
     shrink = exit_flags(df)
 
     names = basic.set_index("secid")["name"]
@@ -326,13 +339,13 @@ def run_scan(score_mode: str | None = None, out_file: str | None = None) -> pd.D
         })
         return out
 
-    signals = collect(sig_c, score_c, "momentum")
+    signals = collect(sig_c, score_c, strat)
     signals["name"] = signals["code"].map(names)
     # 评分归一: 策略内按日排名分位 (0-1); 合成评分本身已秩归一, 再排名不改变顺序
     signals["score"] = signals.groupby(["date", "strategy"])["score"].rank(pct=True)
     signals = signals.sort_values(["date", "strategy", "score"], ascending=[True, True, False])
     signals.to_parquet(out_file, index=False)
-    print(f"信号总数: {len(signals):,}  (动量轮动, 评分模式={mode}, 输出={out_file.split('/')[-1]})", flush=True)
+    print(f"信号总数: {len(signals):,}  ({strat}, 评分模式={mode}, 输出={out_file.split('/')[-1]})", flush=True)
 
     # 退出标志 -> 宽表
     idx = df.index

@@ -16,7 +16,7 @@ import engine                                    # noqa: E402  (MAX_HOLD 权威�
 from refresh_docs import compute_kpis, check_doc_consistency, DOC_SCORE_MODE  # noqa: E402
 
 MAX_HOLD = engine.MAX_HOLD                       # 文案随引擎参数化, 杜绝 "满10日" 硬编码撒谎
-STRAT_CN = {"momentum": "动量轮动"}
+STRAT_CN = {"momentum": "动量轮动", "blackbox": "量化黑盒"}
 REASON_CN = {"stop_loss": "止损", "vol_shrink": "放量滞涨",
              "expired": "持有到期", "quick_fail": "快速认错", "market_exit": "逃顶清仓"}
 REASON_DESC = {"stop_loss": "收盘价 ≤ 买入价×92% (硬止损)",
@@ -202,16 +202,33 @@ def main():
         p_off = dict(p_on, mode="off")   # 兜底: 无关模式数据时复用开模式
     modes["y3"] = {"on": p_on, "off": p_off}
 
-    html = render_html(modes)
+    # ---- 量化黑盒: 同布局/同表结构, 独立回测数据 (LightGBM 排序, meta_bb/meta_no_bb) ----
+    # 模型链路故障时兜底复用动量 payload, 页面保持可用 (标注见 run_daily 非 fatal 设计)。
+    sig_bb_file = f"{META}/signals_bb.parquet"
+    bb_meta, bb_meta_no = f"{BASE}/data/meta_bb", f"{BASE}/data/meta_no_bb"
+    if os.path.exists(sig_bb_file) and os.path.exists(f"{bb_meta}/equity.csv"):
+        sigs_bb = pd.read_parquet(sig_bb_file)
+        sigs_bb["date"] = pd.to_datetime(sigs_bb["date"])
+        pb_on = build_payload(bb_meta, "on", bench, bench1000, sigs_bb, window_years=None)
+        if os.path.exists(f"{bb_meta_no}/equity.csv"):
+            pb_off = build_payload(bb_meta_no, "off", bench, bench1000, sigs_bb, window_years=None)
+        else:
+            pb_off = dict(pb_on, mode="off")
+    else:
+        print("[WARN] 量化黑盒回测数据缺失, 黑盒页暂沿用动量策略数据", flush=True)
+        pb_on, pb_off = dict(p_on, mode="on"), dict(p_off, mode="off")
+    modes_bb = {"y3": {"on": pb_on, "off": pb_off}}
+
+    html = render_html(modes, modes_bb)
     os.makedirs(f"{BASE}/report", exist_ok=True)
     out = f"{BASE}/report/index.html"
     with open(out, "w") as f:
         f.write(html)
     n_on = len(p_on["trades"])
     n_off = len(p_off["trades"])
-    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 全期 开:{n_on}笔/关:{n_off}笔; "
-          f"区间切换由前端切片)", flush=True)
-    return modes
+    print(f"报告已生成: {out}  ({len(html)/1024:.0f} KB, 动量 开:{n_on}/关:{n_off} 笔, "
+          f"黑盒 开:{len(pb_on['trades'])}/关:{len(pb_off['trades'])} 笔; 区间切换由前端切片)", flush=True)
+    return {"momentum": modes, "blackbox": modes_bb}
 
 
 def _kpi_block_html() -> str:
@@ -251,16 +268,58 @@ def _st_banner_html() -> str:
     return ""
 
 
-def render_html(P):
-    data_json = json.dumps(P, ensure_ascii=False)
+def _kpi_block_from_payloads(modes: dict) -> str:
+    """从 payload (单一全期口径) 直接计算 A/B 数据块 —— 量化黑盒页用
+    (refresh_docs.compute_kpis 只认动量策略的 meta/meta_no 目录)。"""
+    def stats(p):
+        eq = np.array(p["equity"], dtype=float)
+        total = float(eq[-1] / eq[0] - 1)
+        d = eq[1:] / eq[:-1] - 1
+        sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
+        sharpe = float(d.mean() / sd * np.sqrt(244)) if sd > 0 else 0.0
+        peak = np.maximum.accumulate(eq)
+        mdd = float((eq / peak - 1).min())
+        tr = p["trades"]
+        win = float(np.mean([t["pnl_pct"] > 0 for t in tr])) if tr else 0.0
+        return dict(ret=total, maxdd=mdd, sharpe=sharpe, trades=len(tr), winrate=win)
+
+    on, off = stats(modes["y3"]["on"]), stats(modes["y3"]["off"])
+
+    def row(label, m):
+        return (f"<tr><td>{label}</td><td class=\"{'up' if m['ret']>=0 else 'down'}\"><b>{m['ret']:+.1%}</b></td>"
+                f"<td>{m['maxdd']:.1%}</td><td>{m['sharpe']:.2f}</td>"
+                f"<td>{m['trades']}</td><td>{m['winrate']:.1%}</td></tr>")
+
+    p_on = modes["y3"]["on"]
+    return (f"<table><tr><th>口径</th><th>收益</th><th>最大回撤</th><th>夏普</th><th>交易</th><th>胜率</th></tr>"
+            f"{row('开 (默认)', on)}{row('关', off)}</table>"
+            f"<p class=\"note\">数据区间 {p_on['start_day']} ~ {p_on['last_day']} · 评分模型 LightGBM lambdarank "
+            f"(walk-forward 滚动训练) · 夏普口径 √244</p>")
+
+
+def render_html(modes: dict, modes_bb: dict) -> str:
+    """双页渲染: PAGE_BLOCK 标记间的 DOM 既是动量页原件, 也克隆为黑盒页
+    (所有 id 加 bb_ 前缀), 两页各自注入独立数据与策略文档。"""
+    import re
+    head, rest = HTML_TEMPLATE.split("<!--PAGE_BLOCK_START-->")
+    block, tail = rest.split("<!--PAGE_BLOCK_END-->")
+    bb_block = block.replace('id="page-momentum"', 'id="page-blackbox" style="display:none"')
+    bb_block = re.sub(r'id="(?!page-)', 'id="bb_', bb_block)
+
+    banner = _st_banner_html()
     doc = (STRAT_DOC
            .replace("__MAX_HOLD__", str(MAX_HOLD))
            .replace("__KPI_BLOCK__", _kpi_block_html()))
-    return (HTML_TEMPLATE
-            .replace("__DATA__", data_json)
-            .replace("__STRAT_DOC__", doc)
-            .replace("__MAX_HOLD__", str(MAX_HOLD))
-            .replace("__ST_BANNER__", _st_banner_html()))
+    doc_bb = (STRAT_DOC_BB
+              .replace("__MAX_HOLD__", str(MAX_HOLD))
+              .replace("__KPI_BLOCK__", _kpi_block_from_payloads(modes_bb)))
+    page_m = block.replace("__STRAT_DOC__", doc).replace("__ST_BANNER__", banner)
+    page_bb = bb_block.replace("__STRAT_DOC__", doc_bb).replace("__ST_BANNER__", banner)
+    html = head + page_m + page_bb + tail
+    html = (html.replace("__DATA__", json.dumps(modes, ensure_ascii=False))
+                .replace("__DATA_BB__", json.dumps(modes_bb, ensure_ascii=False))
+                .replace("__MAX_HOLD__", str(MAX_HOLD)))
+    return html
 
 
 STRAT_DOC = """
@@ -327,6 +386,24 @@ __KPI_BLOCK__
 </div>
 """
 
+# ---- 量化黑盒版策略说明: 与动量版仅「打分排队」段落及对应结论句不同 (同布局/同数据源/同规则) ----
+_P_MOM = """<p>同一天通过的股票往往不止 3 只，谁先买？按一张<b>「综合体检表」</b>打分排队，六项指标加权：</p>
+<ul>
+<li>涨势强不强（30%）＋ 涨得稳不稳（25%）＋ 过去 60 天上涨天数占比（20%）＋ 多头排列持续多久（15%）＋ 波动小不小（5%）＋ 短线回调是否到位（5%）。</li>
+</ul>"""
+_P_BB = """<p>同一天通过的股票往往不止 3 只，谁先买？由一个<b>机器学习排序模型（LightGBM）</b>给每只候选打分排队。模型不预测「涨多少」，而是直接学习「同一批候选里，谁在未来 5 天更容易相对走强」——因为选股只关心<b>谁排在前面</b>，不关心具体涨跌数值。</p>
+<ul>
+<li><b>看什么</b>：约 35 个量价特征——各周期涨幅、波动率、量能变化、日内/隔夜结构、均线/KDJ 形态，以及关键因子在当日全市场的横截面排名；</li>
+<li><b>怎么学</b>：滚动训练——每次只用预测日之前、且未来 5 天涨跌已走完的历史数据训练，给接下来的日子打分，全程不偷看未来；</li>
+<li><b>怎么验</b>：NDCG@3（前 3 名排对了没有）与 Rank IC（打分排序与实际收益排序的相关性）持续跟踪，方案细节见腾讯文档《基于 LightGBM 排序模型的 A 股短期选股方案》。</li>
+</ul>"""
+STRAT_DOC_BB = (STRAT_DOC
+                .replace(_P_MOM, _P_BB)
+                .replace("收益约为关的 2.2 倍，最大回撤只有关的约 1/3。机制也很直白：清仓空出来的名额，能让位给评分更高的新股票，「换仓周转」本身就在赚钱。",
+                         "黑盒口径同样默认开启仓位控制（与动量策略同理由：收益、回撤、夏普、胜率四项指标全面占优）。")
+                .replace("权重来自一轮轮对比实测（不同权重各跑一遍三年回测，选四项指标都占优的那组），当前这组在收益、回撤、夏普、胜率上全面领先。",
+                         "模型质量以 NDCG@3 与 Rank IC 持续跟踪，样本外排序能力明显衰减时会下线回退到加权指标排队。"))
+
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -387,9 +464,9 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 <nav class="side">
   <div class="brand">A股短线策略<br>（影子账户）</div>
   <a class="nav-item on" data-page="momentum" onclick="showPage('momentum')">动量策略<span class="nav-note">趋势质量轮动 · 日频</span></a>
-  <a class="nav-item" data-page="blackbox" onclick="showPage('blackbox')">量化黑盒<span class="nav-note">因子 · 信号 · 实验记录</span></a>
+  <a class="nav-item" data-page="blackbox" onclick="showPage('blackbox')">量化黑盒<span class="nav-note">LightGBM 排序 · 日频</span></a>
 </nav>
-<div class="wrap page" id="page-momentum">
+<!--PAGE_BLOCK_START--><div class="wrap page" id="page-momentum">
 <div class="hdr">
   <div>
     <h1>动量策略</h1>
@@ -397,8 +474,8 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
   </div>
   <div>
     <div class="mode-sw" id="modeSw">
-      <button class="mode-btn on" data-m="on" onclick="setMode('on')">仓位控制 开</button>
-      <button class="mode-btn" data-m="off" onclick="setMode('off')">关 (满仓无择时)</button>
+      <button class="mode-btn on" data-m="on">仓位控制 开</button>
+      <button class="mode-btn" data-m="off">关 (满仓无择时)</button>
     </div>
     <div class="mode-note">大盘状态机 Z0–Z3 · 锚定上证</div>
   </div>
@@ -433,7 +510,7 @@ __ST_BANNER__<div class="warn" style="margin-top:14px" id="warnBar"></div>
 
 <div class="card"><h2>当前持仓 <span class="note" id="holdNote"></span></h2><table id="holdTable"></table></div>
 
-<div class="card"><h2>交易明细 <span class="note" id="tradeNote"></span><button class="fold-btn" id="tradeToggle" onclick="toggleTrade()">展开明细 ▾</button></h2><div id="tradeWrap" style="display:none"><table id="tradeTable"></table></div></div>
+<div class="card"><h2>交易明细 <span class="note" id="tradeNote"></span><button class="fold-btn" id="tradeToggle">展开明细 ▾</button></h2><div id="tradeWrap" style="display:none"><table id="tradeTable"></table></div></div>
 
 <div class="card" id="stratDoc"><h2>策略说明</h2>
 __STRAT_DOC__
@@ -441,45 +518,34 @@ __STRAT_DOC__
 
 <footer id="foot"></footer>
 </div>
-
-<div class="wrap page" id="page-blackbox" style="display:none">
-<div class="hdr">
-  <div>
-    <h1>量化黑盒</h1>
-    <div class="sub">策略内部机制 · 因子构成 · 信号与实验记录</div>
-  </div>
-</div>
-<div class="card"><h2>内容筹备中</h2>
-<p>这一目录计划收录动量策略「黑盒内部」的内容：</p>
-<ul style="padding-left:18px;margin:6px 0 0">
-<li>评分因子构成与权重（趋势质量五因子 + KDJ 微权重，pct-rank 线性加权合成）；</li>
-<li>每日信号全量列表与各因子得分明细；</li>
-<li>A/B 实验台账（因子取舍、持有期、仓位口径的对比结论）；</li>
-<li>数据质量与校验记录（ST 逐日过滤、退市精确剔除、仓库一致性）。</li>
-</ul>
-<p style="color:#88867E;margin-top:10px">页面建设中，内容将随迭代逐步上线。</p>
-</div>
-</div>
+<!--PAGE_BLOCK_END-->
 </div>
 <script>
 const MODES = __DATA__;
-let curWin = 'y3';          // 唯一窗口: 回测全期 payload (区间切换由 rangeN 前端切片)
-let D = MODES[curWin].on;  // 默认: 近一年切片 · 开启仓位控制
-let curMode = 'on';
+const MODES_BB = __DATA_BB__;
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
 const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
 
 // ---------- 左侧目录: 页面切换 (默认动量策略) ----------
+// 双 DOM 实例方案: 每页独立的数据/区间/仓位口径状态与图表, 切换互不影响。
+// 动量页 prefix='' 数据 MODES; 黑盒页 prefix='bb_' 数据 MODES_BB (同表结构, 独立回测)。
 function showPage(p){
   document.querySelectorAll('.page').forEach(el=>el.style.display = el.id==='page-'+p ? '' : 'none');
   document.querySelectorAll('.side .nav-item').forEach(a=>a.classList.toggle('on', a.dataset.page===p));
-  if(p==='momentum'){ window.dispatchEvent(new Event('resize')); }  // 唤醒 echarts 重排
+  window.dispatchEvent(new Event('resize'));  // 唤醒两页 echarts 重排 (隐藏页 init 时尺寸为 0)
 }
 
+// ---------- 页面工厂: 同一套渲染逻辑, 前缀区分两页 DOM ----------
+function initPage(P, MODES, STRAT_LABEL){
+  const el = id => document.getElementById(P + id);
+  let curWin = 'y3';          // 唯一窗口: 回测全期 payload (区间切换由 rangeN 前端切片)
+  let D = MODES[curWin].on;  // 默认: 近一年切片 · 开启仓位控制
+  let curMode = 'on';
+
 // ---------- 仓位控制模式切换 ----------
-const WARN_ON  = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
-const WARN_OFF = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制关闭</b>: 始终满仓运行 (最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。注意: 该口径在 2024 年初微盘踩踏中无任何系统性保护。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
+const WARN_ON  = `本报告回测覆盖<b>${STRAT_LABEL}</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。`;
+const WARN_OFF = `本报告回测覆盖<b>${STRAT_LABEL}</b>策略, <b>仓位控制关闭</b>: 始终满仓运行 (最多同时持有 10 只, 每日最多新开仓 3 只), 无大盘择时。注意: 该口径在 2024 年初微盘踩踏中无任何系统性保护。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。`;
 const FOOT_ON  = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨停放弃买入, 开盘跌停顺延卖出; 止损-8% / 放量滞涨 / 持有满__MAX_HOLD__日退出; 上证指数触发「买卖点」空仓条件(Z0)时全线清仓。<br>
    仓位控制(开): 每日最多新开仓 3 只; 总仓位锚定上证指数状态机 — Z0 空仓0% / Z1 轻仓30% / Z2 半仓50% / Z3 重仓100%(均线多头排列)。<br>
    买入股数: 按整手(100股整数倍, 最低1手)向下取整, 单只预算≈总资金/10 且不超状态机目标仓位。<br>
@@ -491,9 +557,9 @@ const FOOT_OFF = `回测口径: T日收盘出信号, T+1开盘成交; 开盘涨�
 function setMode(m){
   if(!MODES[curWin][m] || m===curMode) return;
   curMode = m; D = MODES[curWin][m];
-  document.querySelectorAll('#modeSw .mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
-  document.getElementById('warnBar').innerHTML = m==='on' ? WARN_ON : WARN_OFF;
-  document.getElementById('foot').innerHTML = m==='on' ? FOOT_ON : FOOT_OFF;
+  el('modeSw').querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  el('warnBar').innerHTML = m==='on' ? WARN_ON : WARN_OFF;
+  el('foot').innerHTML = m==='on' ? FOOT_ON : FOOT_OFF;
   renderAll();
 }
 
@@ -501,17 +567,17 @@ function setMode(m){
 let tradeOpen = false;
 function toggleTrade(){
   tradeOpen = !tradeOpen;
-  document.getElementById('tradeWrap').style.display = tradeOpen ? '' : 'none';
-  document.getElementById('tradeToggle').textContent = tradeOpen ? '收起明细 ▴' : '展开明细 ▾';
+  el('tradeWrap').style.display = tradeOpen ? '' : 'none';
+  el('tradeToggle').textContent = tradeOpen ? '收起明细 ▴' : '展开明细 ▾';
 }
 
 // ---------- 区间切换: 统一从全期 payload 切"最后 N+1 个交易日", 切片起点重归一 ¥100万 ----------
 // (策略与三条基准同一切片起点归一, 归一语义唯一; 近三年=全期, 切片起点即 payload 起点为 no-op)
 let rangeN = 244;   // 默认近一年
-document.getElementById('rangeTabs').addEventListener('click', e => {
+el('rangeTabs').addEventListener('click', e => {
   const t = e.target;
   if(t.dataset.n === undefined) return;
-  document.querySelectorAll('#rangeTabs .tab').forEach(x=>x.classList.remove('on'));
+  el('rangeTabs').querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');
   rangeN = +t.dataset.n;
   D = MODES[curWin][curMode];
@@ -561,7 +627,7 @@ function kpis(){
   const cSd = Math.sqrt(cDaily.reduce((x,y)=>x+(y-cMean)**2,0)/Math.max(cDaily.length-1,1));
   const cSharpe = cSd>0 ? cMean/cSd*Math.sqrt(244) : 0;
   let cPeak=c[0], cMdd=0; for(const v of c){cPeak=Math.max(cPeak,v); cMdd=Math.min(cMdd, v/cPeak-1);}
-  document.getElementById('kpiTable').innerHTML =
+  el('kpiTable').innerHTML =
     `<thead><tr><th>指标</th><th>本策略</th><th>沪深300长持</th><th>中证1000长持</th></tr></thead><tbody>`+
     `<tr><td>区间收益</td><td class="${cls(total)}"><b>${fmtPct(total)}</b></td><td class="${cls(bTotal)}">${fmtPct(bTotal)}</td><td class="${cls(cTotal)}">${fmtPct(cTotal)}</td></tr>`+
     `<tr><td>最大回撤</td><td class="down"><b>${fmtPct(mdd)}</b></td><td class="down">${fmtPct(bMdd)}</td><td class="down">${fmtPct(cMdd)}</td></tr>`+
@@ -588,7 +654,7 @@ function drawEquity(){
     xAxis:{type:'category',data:sl.dates,axisLabel:{fontSize:10,color:'#88867E'}},
     yAxis:{type:'value',scale:true,axisLabel:{fontSize:10,color:'#88867E',formatter:nf}},
     series}, true);
-  document.getElementById('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
+  el('eqNote').textContent = `(${sl.start} ~ ${D.last_day}, 起点归一 ¥100万)`;
 }
 
 function drawReasons(tr){
@@ -610,25 +676,25 @@ function tables(tr){
     <td>${t.entry_date}</td><td>${t.entry_px.toFixed(2)}</td><td>${t.shares.toLocaleString()}</td><td>${t.exit_px.toFixed(2)}</td>
     <td class="${cls(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</td><td class="${cls(t.pnl_cny)}">${nf(t.pnl_cny)}</td>
     <td>${t.hold_days}天</td><td>${t.reason}</td></tr>`).join('');
-  document.getElementById('tradeTable').innerHTML =
+  el('tradeTable').innerHTML =
     `<thead><tr><th>卖出日</th><th>代码</th><th>名称</th><th>策略</th><th>买入日</th><th>买价</th><th>股数</th><th>卖价</th><th>收益率</th><th>盈亏(¥)</th><th>持有</th><th>原因</th></tr></thead><tbody>${rows||'<tr><td colspan=12 class="note">该区间无交易</td></tr>'}</tbody>`;
-  document.getElementById('tradeNote').textContent = `(共 ${tr.length} 笔, 显示前 ${Math.min(tr.length,400)} 笔, 按卖出日排序 · 股数按整手交易, 1手=100股)`;
+  el('tradeNote').textContent = `(共 ${tr.length} 笔, 显示前 ${Math.min(tr.length,400)} 笔, 按卖出日排序 · 股数按整手交易, 1手=100股)`;
   // 当前持仓
-  document.getElementById('holdTable').innerHTML =
+  el('holdTable').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>策略</th><th>买入日</th><th>买价</th><th>股数</th><th>市值(¥)</th><th>持有</th><th>浮动盈亏</th></tr></thead><tbody>`+
     (D.holdings.map(h=>`<tr><td>${h.code}</td><td>${h.name}</td><td>${h.strategy_cn}</td><td>${h.entry_date}</td><td>${h.entry_px.toFixed(2)}</td><td>${h.shares.toLocaleString()}</td><td>${nf(h.value)}</td><td>${h.hold_days}天</td><td class="${cls(h.pnl_pct)}">${fmtPct(h.pnl_pct)}</td></tr>`).join('')||'<tr><td colspan=9 class="note">空仓</td></tr>')+'</tbody>';
   const hr = D.hold_ratio || 0;
-  document.getElementById('holdNote').textContent =
+  el('holdNote').textContent =
     `(${D.last_day} 收盘 · ${D.holdings.length}只 · 合计 ¥${nf(D.hold_value||0)} · 实际仓位 ${(hr*100).toFixed(0)}%)`;
   // 下一交易日计划
-  document.getElementById('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行)`;
+  el('planNote').textContent = `(${D.last_day} 收盘判定 · 下一开盘执行)`;
   const sp = D.sell_plan || [];
-  document.getElementById('planSell').innerHTML =
+  el('planSell').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>卖出条件</th></tr></thead><tbody>`+
     (sp.map(s=>`<tr><td>${s.code}</td><td>${s.name}</td><td>${s.entry_date}</td><td>${s.hold_days}天</td><td class="${cls(s.pnl_pct)}">${fmtPct(s.pnl_pct)}</td><td><b>${s.reason}</b> · ${s.condition}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">收盘时无待卖持仓, 下个交易日不卖出</td></tr>')+'</tbody>';
   const rl = D.risk_list || [];
-  document.getElementById('planRisk').innerHTML =
+  el('planRisk').innerHTML =
     `<thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>持有</th><th>浮盈亏</th><th>风险提示</th></tr></thead><tbody>`+
     (rl.map(r=>`<tr><td>${r.code}</td><td>${r.name}</td><td>${r.entry_date}</td><td>${r.hold_days}天</td><td class="${cls(r.pnl_pct)}">${fmtPct(r.pnl_pct)}</td><td>${r.risks.map(x=>'<span style="color:#633806">⚠</span> '+x).join('<br>')}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">当前无接近卖出条件的持仓</td></tr>')+'</tbody>';
@@ -636,7 +702,7 @@ function tables(tr){
   const buyCond = curMode==='on'
     ? `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 总仓位不超过状态机目标 (Z0 0%/Z1 30%/Z2 50%/Z3 100%)`
     : `信号已触发; 次日开盘价不为一字涨停即可买入, 开盘涨停放弃; 最多同时持有 10 只`;
-  document.getElementById('planBuy').innerHTML =
+  el('planBuy').innerHTML =
     `<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>评分</th><th>建议仓位</th><th>买入条件</th></tr></thead><tbody>`+
     (D.pending.map(p=>`<tr><td>第${p.rank}名</td><td>${p.code}</td><td>${p.name}</td><td>${p.score.toFixed(3)}</td><td>${perStock}</td><td>${buyCond}</td></tr>`).join('')
      ||'<tr><td colspan=6 class="note">最后交易日无信号, 下个交易日无新开仓计划</td></tr>')+'</tbody>';
@@ -654,7 +720,7 @@ function drawBuyReasons(tr){
     const pnl = g.reduce((a,x)=>a+x.pnl_cny,0);
     return `<tr><td>${k}</td><td>${n}</td><td class="${w>=0.5?'up':'down'}">${(w*100).toFixed(1)}%</td><td class="${cls(avg)}">${fmtPct(avg)}</td><td class="${cls(pnl)}">${nf(pnl)}</td></tr>`;
   }).join('');
-  document.getElementById('buyReasonTable').innerHTML =
+  el('buyReasonTable').innerHTML =
     `<thead><tr><th>买入原因</th><th>笔数</th><th>胜率</th><th>平均收益</th><th>盈亏合计(¥)</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class="note">该区间无交易</td></tr>'}</tbody>`;
 }
 
@@ -663,15 +729,21 @@ function renderAll(){
   drawEquity(); drawReasons(tr); drawBuyReasons(tr); tables(tr);
 }
 
-document.getElementById('sub').textContent =
+el('sub').textContent =
   `生成于 ${D.generated} · 区间切换=回测全期切片(切片起点重归一 ¥100万) · 每日最多买3只 · 佣金万1+印花税0.05%+滑点0.1%`;
-document.getElementById('warnBar').innerHTML = WARN_ON;
-document.getElementById('foot').innerHTML = FOOT_ON;
+el('warnBar').innerHTML = WARN_ON;
+el('foot').innerHTML = FOOT_ON;
+el('modeSw').querySelectorAll('.mode-btn').forEach(b=>b.onclick=()=>setMode(b.dataset.m));
+el('tradeToggle').onclick = toggleTrade;
 
-eqChart = echarts.init(document.getElementById('eqChart'));
-reasonChart = echarts.init(document.getElementById('reasonChart'));
+eqChart = echarts.init(el('eqChart'));
+reasonChart = echarts.init(el('reasonChart'));
 renderAll();
 window.addEventListener('resize', ()=>{eqChart.resize();reasonChart.resize();});
+}  // initPage 结束
+
+initPage('', MODES, '动量轮动');
+initPage('bb_', MODES_BB, '量化黑盒');
 </script>
 </body>
 </html>
