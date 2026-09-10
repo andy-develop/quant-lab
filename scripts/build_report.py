@@ -333,14 +333,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>A股短线策略实验室（动量策略） · 回测报告</title>
+<title>A股短线策略（影子账户）</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
 :root{--bg:#F6F6F4;--card:#FFFFFF;--ink:#26251F;--muted:#88867E;--line:#E4E3DC;
 --up:#D5423E;--down:#1D9E75;--blue:#185FA5;--amber:#854F0B;--purple:#534AB7;}
 *{margin:0;padding:0;box-sizing:border-box;}
 body{background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,"PingFang SC","Helvetica Neue",sans-serif;padding:28px 32px;}
-.wrap{max-width:1180px;margin:0 auto;}
+.shell{max-width:1380px;margin:0 auto;display:flex;gap:22px;align-items:flex-start;}
+.side{width:170px;flex-shrink:0;position:sticky;top:28px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 12px;}
+.side .brand{font-size:15px;font-weight:600;letter-spacing:.5px;line-height:1.55;padding:2px 6px 12px;border-bottom:1px solid var(--line);margin-bottom:10px;}
+.nav-item{display:block;padding:8px 10px;border-radius:10px;font-size:13.5px;color:var(--muted);cursor:pointer;}
+.nav-item:hover{color:var(--ink);background:#FAFAF7;}
+.nav-item.on{background:var(--ink);color:#fff;}
+.nav-item .nav-note{display:block;font-size:10.5px;color:inherit;opacity:.65;margin-top:1px;}
+@media(max-width:900px){.shell{flex-direction:column}.side{width:100%;position:static;display:flex;align-items:center;gap:8px;padding:10px 12px}.side .brand{border:0;margin:0;padding:0 8px 0 2px;font-size:14px}.nav-item{display:inline-block}}
+.wrap{flex:1;min-width:0;}
 h1{font-size:22px;font-weight:600;letter-spacing:.5px;}
 .sub{color:var(--muted);font-size:12.5px;margin-top:4px;}
 .tabs{display:flex;gap:8px;margin:20px 0 14px;flex-wrap:wrap;}
@@ -375,10 +383,16 @@ footer{color:var(--muted);font-size:11.5px;margin-top:20px;line-height:1.8;}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="shell">
+<nav class="side">
+  <div class="brand">A股短线策略<br>（影子账户）</div>
+  <a class="nav-item on" data-page="momentum" onclick="showPage('momentum')">动量策略<span class="nav-note">趋势质量轮动 · 日频</span></a>
+  <a class="nav-item" data-page="blackbox" onclick="showPage('blackbox')">量化黑盒<span class="nav-note">因子 · 信号 · 实验记录</span></a>
+</nav>
+<div class="wrap page" id="page-momentum">
 <div class="hdr">
   <div>
-    <h1>A股短线策略实验室（动量策略）</h1>
+    <h1>动量策略</h1>
     <div class="sub" id="sub"></div>
   </div>
   <div>
@@ -427,6 +441,26 @@ __STRAT_DOC__
 
 <footer id="foot"></footer>
 </div>
+
+<div class="wrap page" id="page-blackbox" style="display:none">
+<div class="hdr">
+  <div>
+    <h1>量化黑盒</h1>
+    <div class="sub">策略内部机制 · 因子构成 · 信号与实验记录</div>
+  </div>
+</div>
+<div class="card"><h2>内容筹备中</h2>
+<p>这一目录计划收录动量策略「黑盒内部」的内容：</p>
+<ul style="padding-left:18px;margin:6px 0 0">
+<li>评分因子构成与权重（趋势质量五因子 + KDJ 微权重，pct-rank 线性加权合成）；</li>
+<li>每日信号全量列表与各因子得分明细；</li>
+<li>A/B 实验台账（因子取舍、持有期、仓位口径的对比结论）；</li>
+<li>数据质量与校验记录（ST 逐日过滤、退市精确剔除、仓库一致性）。</li>
+</ul>
+<p style="color:#88867E;margin-top:10px">页面建设中，内容将随迭代逐步上线。</p>
+</div>
+</div>
+</div>
 <script>
 const MODES = __DATA__;
 let curWin = 'y3';          // 唯一窗口: 回测全期 payload (区间切换由 rangeN 前端切片)
@@ -435,6 +469,13 @@ let curMode = 'on';
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const cls = x => x>=0 ? 'up' : 'down';
 const nf = x => x.toLocaleString('zh-CN', {maximumFractionDigits:0});
+
+// ---------- 左侧目录: 页面切换 (默认动量策略) ----------
+function showPage(p){
+  document.querySelectorAll('.page').forEach(el=>el.style.display = el.id==='page-'+p ? '' : 'none');
+  document.querySelectorAll('.side .nav-item').forEach(a=>a.classList.toggle('on', a.dataset.page===p));
+  if(p==='momentum'){ window.dispatchEvent(new Event('resize')); }  // 唤醒 echarts 重排
+}
 
 // ---------- 仓位控制模式切换 ----------
 const WARN_ON  = '本报告回测覆盖<b>动量轮动</b>策略, <b>仓位控制开启</b>: 总仓位锚定上证指数「买卖点」状态机 (Z0 空仓 0% 且触发全线清仓 / Z1 轻仓 30% / Z2 半仓 50% / Z3 重仓 100%, 阶梯预算), 关闭切换见右上角。所有结果含佣金万1、印花税与滑点, 涨跌停与 T+1 规则已内建。';
