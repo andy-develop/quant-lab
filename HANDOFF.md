@@ -37,7 +37,7 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 | `run_daily.py` | 编排: 动量双口径回测(meta/meta_no) → 黑盒模型打分+双口径回测(meta_bb/meta_no_bb, 非 fatal) → 报告; 关键步骤失败即中止 |
 | `build_report.py` | 静态报告: 双页架构(动量策略/量化黑盒, 同布局同表结构, 独立数据 `__DATA__`/`__DATA_BB__` + `bb_` id 前缀); 单一全期 payload, 区间切换由前端切片+重归一 ¥100万; 右上角"仓位控制 开/关"; ST 落后>7天红色横幅 |
 | `trim_data.py` | 数据滚动清理 |
-| `upload_hsk.sh` | 报告上传坚果云托管 |
+| `upload_hsk.sh` | (已弃用) 原报告上传坚果云/花生壳托管; 2026-09-10 平台禁用已建资源内容更新(11301002), 报告分发迁移至 WorkBuddy「发布为应用」(本地自动化每日重发布, 链接固定) |
 
 ## 3. 当前策略状态 (2026-09-08 上线版)
 
@@ -120,7 +120,8 @@ baostock (历史回补)  ──►  daily_update.py   K线快照增量+除权修
 - **推送绕代理**: `git -c http.proxy= -c https.proxy= -c http.version=HTTP/1.1 push origin main` (本机代理对 github.com CONNECT 502; 失败时可用 api.github.com 兜底, 参见 quant-lab-ml 的 scripts/api_push.py)
 - **数据校验**: `python skills/quant-lab-data/scripts/verify_store.py` (只读, 查重复/对齐/缺口)
 - **多日数据缺口**: 走 fixup 整段重拉 (见 quant-lab-data skill 第 4 节), daily_update 一次只补一天
-- **报告未更新排查**: CI 日志 grep "评分模式" / "总收益" / "上传"; 线上 curl https://kpqv8z.gicp.fun 确认
+- **报告发布 (2026-09-10 起)**: WorkBuddy「发布为应用」— `report/` 目录静态发布, 链接固定, 由本地 WorkBuddy 自动化每交易日 17:45 重发布 (git pull → 本地 run_daily/重建报告 → 覆盖发布)。花生壳 gicp.fun 域名已死 (平台禁用更新, 11301002)
+- **报告未更新排查**: WorkBuddy 自动化运行日志; 本地 `python scripts/build_report.py` 后重发布即可; CI 日志 grep "评分模式" / "总收益" 确认数据链路
 
 ## 8. 硬性陷阱 (违反即数据损坏, 详见 ~/.workbuddy/skills/quant-lab-data/SKILL.md)
 
