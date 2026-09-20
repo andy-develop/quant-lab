@@ -5,4 +5,9 @@ baostock==0.9.3
 requests==2.34.2
 pytest==9.1.1
 lightgbm==4.7.0
+# scikit-learn: lightgbm 的 LGBMRanker 需要它做 sklearn 接口层 (sklearn 分组/
+# 标签编码)。漏声明会让「量化黑盒」(run_daily 第 4 步) 每跑必抛
+# LightGBMError: scikit-learn is required —— 而该步骤是 non-fatal, 报错被
+# WARN 吞掉, 黑盒页长期拿动量策略数据顶替 (2026-09-20 复盘发现)。
+scikit-learn==1.9.1
 scipy
