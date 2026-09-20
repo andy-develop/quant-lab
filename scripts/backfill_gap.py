@@ -17,6 +17,15 @@
     raw: code,date,open,high,low,close,volume,amount   volume 单位=**股** (baostock 本就是股)
     hfq: code,date,open,high,low,close                 adjustflag=1, 历史值永久冻结
     **绝不写 qfq** (2026-09-13 已整族移除, 信号链路唯一口径 hfq)
+
+## 成本与上限 (ponytail 标注: 故意不做的优化)
+串行 baostock 逐只抓取 (每标的 raw+hfq 两次查询), **实测 0.278s/只** (n=175) ->
+全市场 5215 只约 **24~31 分钟** (本地直连; 取样含 27% 不存在代码, 空查询更快 -> 真实值偏高;
+CI runner 跨境到 baostock 只会更慢, 故作业超时已从 90 抬到 150 分钟)。
+需要大幅提速时的**升级路径**: 本仓库既有模式是 `backfill_baostock.py <worker_id> <total_workers>`
+多进程分片 —— baostock 是模块级全局会话, **线程池不安全**, 必须多进程各自 `bs.login()`;
+届时应让分片进程只写自己那份 incremental 文件、由单一进程收尾同步三个指数。当前一次性
+回补 24~31 分钟可接受, 故不实现。
 """
 import argparse
 import datetime
