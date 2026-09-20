@@ -131,14 +131,41 @@ def snapshot_day(s: requests.Session, secids: list[str], day_ts: pd.Timestamp) -
     return df
 
 
+def _code6(code) -> str:
+    """任意代码写法 -> 6 位数字码（腾讯 secid `1.600000` / baostock `sh.600000` / `600000`）。
+
+    ★ 门禁两侧口径必须一致，否则永远假红灯：
+      快照行 code 是腾讯 secid 式，universe 是 baostock 式，字符串集合**永不相交**
+      —— 2026-09-18 21:01 CI 实测 `[coverage/stock] RED 0/5215 = 0.0% (other=0.0%)`，
+      快照其实拿全了 5203 只，却被判 0% 并拒绝写盘（当天数据全丢）。
+    另外 vendor._market_of 只认 6 位纯数字：不归一会把所有代码塞进 other 桶，
+    分市场下限（§0.4 的核心防线）静默失效。
+    """
+    c = str(code).strip()
+    return c.split(".", 1)[1] if "." in c else c
+
+
+def _to_shares(df: pd.DataFrame, col: str = "volume") -> pd.DataFrame:
+    """腾讯系 volume 单位是**手**，库内口径是**股**（HANDOFF 陷阱 #4）-> ×100。
+
+    腾讯的两个来源（qt.gtimg 快照 parts[6] / ifzq 日K）都是手；baostock 是股。
+    不归一化的话，增量文件与主分片拼在一起后同一列混两种单位，
+    signals 的 vol_ma20 / 放量滞涨（vol >= 2*prev_vol_ma5）会在分片边界跳 100 倍。
+    """
+    if not df.empty and col in df.columns:
+        df[col] = (pd.to_numeric(df[col], errors="coerce") * 100).astype("int64")
+    return df
+
+
 def _gate_snapshot(df: pd.DataFrame, basic: pd.DataFrame, day_ts: pd.Timestamp) -> None:
     """覆盖率硬门禁：<95% 黄灯告警，<80% 红灯中止（不写盘）。
 
     §0.4 的 39/2316=1.7% 沪市覆盖率必须在写盘前拦下 —— 旧实现没有任何断言，
     于是坏数据直接进 incremental/ 并被后续信号消费。
     """
-    got = df["code"].tolist() if not df.empty else []
+    got = [_code6(c) for c in (df["code"].tolist() if not df.empty else [])]
     uni = basic[basic["status"] == "1"][["code"]].copy()
+    uni["code"] = uni["code"].map(_code6)
     res = check_stock_coverage(got, uni, day=f"{day_ts:%Y-%m-%d}", raise_on_red=False)
     print("  " + res.summary(), flush=True)
     if res.level == "red":
@@ -289,7 +316,9 @@ def update_kline() -> pd.Timestamp:
     # 除权股当日行取自修复序列; 其余用折算
     snap_ok = snap[~snap["is_div"]].copy()
     snap_ok["adj"] = snap_ok["code"].map(ratio).fillna(1.0)
-    inc_raw = snap_ok[["code", "date", "open", "close", "high", "low", "volume", "amount"]].reset_index(drop=True)
+    # ★ 入库前把腾讯快照的手换算成股, 与 baostock 主分片同口径 (HANDOFF 陷阱 #4)
+    inc_raw = _to_shares(
+        snap_ok[["code", "date", "open", "close", "high", "low", "volume", "amount"]].reset_index(drop=True))
     ohlc_hfq = snap_ok[["open", "close", "high", "low"]].mul(snap_ok["adj"], axis=0).reset_index(drop=True)
     inc_hfq = pd.concat([snap_ok[["code", "date"]].reset_index(drop=True), ohlc_hfq], axis=1)
     os.makedirs(f"{KDIR}/incremental", exist_ok=True)
@@ -350,7 +379,7 @@ def refetch_one(s: requests.Session, code: str, sym: str) -> tuple[pd.DataFrame,
     raw, qfq = get(""), get("qfq")
     if raw is None or qfq is None:
         return None
-    return raw, qfq
+    return _to_shares(raw), qfq
 
 
 def update_pool(last_day: pd.Timestamp | None = None) -> None:
