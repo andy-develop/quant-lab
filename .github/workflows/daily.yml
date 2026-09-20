@@ -8,6 +8,12 @@ on:
     - cron: '30 8 * * 1-5'
     - cron: '0 13 * * 1-5'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'daily=常规每日更新; backfill-gap=先按真实交易日历回补整段缺口再走常规流程'
+        type: choice
+        options: [daily, backfill-gap]
+        default: daily
 
 concurrency:
   group: daily-quant
@@ -21,6 +27,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # 定时触发时 github.event.inputs 为空 -> 回落到 daily
+    env:
+      MODE: ${{ github.event.inputs.mode || 'daily' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +43,14 @@ jobs:
 
       - name: 单元测试 (核心逻辑回归, 失败即中止; 依赖 run_daily 产物的 8 个测试此时 skip, 产物生成后重跑)
         run: python -m pytest tests/ -q
+
+      # 只在人工选 backfill-gap 时执行。why: daily_update.update_kline() 一次只能补
+      # "一天"(按 target_day 抓当日快照), 且发现 store.max >= target_day 就直接跳过 ——
+      # 整段停摆(如 2026-09-14~09-18 停滞 5 天)后它自己永远追不回来, 只能按真实
+      # 交易日历定缺口整段补。无缺口时该脚本只打印一行并退出, 不写任何文件(幂等)。
+      - name: 回补整段交易日缺口 (仅 mode=backfill-gap)
+        if: env.MODE == 'backfill-gap'
+        run: python scripts/backfill_gap.py
 
       - name: 每日数据更新 (K线快照 + 除权修复)
         run: python scripts/daily_update.py
@@ -64,7 +81,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet data/meta/st_history.parquet data/meta/lgbm_model.txt data/meta/lgbm_model_meta.json
+          git add data/kline data/meta/stock_basic.parquet data/meta/index_daily.parquet data/meta/bench_daily.parquet data/meta/csi1000_daily.parquet data/meta/st_history.parquet data/meta/lgbm_model.txt data/meta/lgbm_model_meta.json
           # lgbm_scores.parquet 体积 ~10MB 且每日全文件重写 —— parquet 不可增量追加,
           # 每天提交会让仓库以 10MB/天 膨胀。策略: 仅每月 1 号刷新基线快照 (10MB/月);
           # 中间日期的分数由 run_daily 每次内存增量补算 (walk-forward 确定性, 结果可复现)。
@@ -85,17 +102,27 @@ jobs:
             echo "::warning::仓库已超过 1GB —— 数据外置到 GitHub Releases (2GB/文件, 不计仓库体积) 或 filter-repo 瘦身历史"
           fi
 
-      - name: 失败告警 (已有未关闭告警 issue 则不重复, 防刷屏)
+      - name: 失败告警 (同题 issue 只留一个, 但每次失败都追加评论)
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TITLE="daily-quant 运行失败"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          NOW=$(date -u '+%F %T UTC')
           N=$(gh issue list -R "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq 'length')
           if [ "$N" = "0" ]; then
-            gh issue create -R "${{ github.repository }}" -t "$TITLE" \
-              -b "失败 run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} ($(date -u '+%F %T UTC'))" \
-              -b "定时 run 失败意味着当天报告不会更新 (数据/报告口径以最近一次成功 run 为准); 修复后请关闭本 issue。"
+            # 原实现写了两个 -b, 后一个覆盖前一个 -> issue 正文里根本没有 run 链接
+            # (实测 #1 正文只剩第二句)。合并成单个 body。
+            BODY=$(printf '失败 run: %s (%s)\n\n定时 run 失败意味着当天报告不会更新 (数据/报告口径以最近一次成功 run 为准); 修复后请关闭本 issue。' "$RUN_URL" "$NOW")
+            gh issue create -R "${{ github.repository }}" -t "$TITLE" -b "$BODY"
           else
-            echo "已有未关闭的失败告警 issue, 不重复创建"
+            # ★ 原实现此处只 echo 一句就结束 —— 已有未关闭告警 issue 时, 后续失败
+            #   一条新告警都不发。2026-09-14~09-18 流水线整整停摆 5 天, 而 #1
+            #   全程 open(09-10 建, 09-20 才关), 期间零告警, 无人知晓。
+            #   改为往已有 issue 追加评论: 不刷屏, 但每次失败都留痕可查。
+            NUM=$(gh issue list -R "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
+            gh issue comment -R "${{ github.repository }}" "$NUM" \
+              -b "$(printf '同一 issue 内再次失败: %s (%s)' "$RUN_URL" "$NOW")"
+            echo "已有告警 issue #$NUM, 已追加评论"
           fi
