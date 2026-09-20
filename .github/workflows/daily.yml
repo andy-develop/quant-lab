@@ -26,7 +26,10 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 150 而非 90: mode=backfill-gap 的整段回补是**串行 baostock** 逐只抓取 (全仓唯一),
+    # 实测 0.28s/只 -> 5215 只约 24~31 分钟 (本地直连; CI runner 跨境只会更慢),
+    # 叠加 run_daily 10~25 分钟 => 原 90 分钟上限过于贴顶。日常 mode=daily 仅 4~5 分钟, 不受影响。
+    timeout-minutes: 150
     # 定时触发时 github.event.inputs 为空 -> 回落到 daily
     env:
       MODE: ${{ github.event.inputs.mode || 'daily' }}
