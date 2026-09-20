@@ -83,11 +83,12 @@ def build_indicators(hfq: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     df["ret120"] = df["close"] / gshift(df["close"], 120) - 1
     df["ma60_rising"] = df["ma60"] > gshift(df["ma60"], 20)
     # 流动性: 优先用真实成交额(baostock raw 分片/腾讯快照均含 amount);
-    # 缺失时退化为 收盘*量(手)*100 近似
+    # 缺失时退化为 收盘*量 近似 —— volume 口径已在入库处统一为**股**
+    # (daily_update._to_shares: 腾讯手×100; baostock 本就是股), 故此处不再 ×100。
     if "amount" in r.columns:
-        df["amt"] = r["amount"].fillna(df["close"] * df["volume"] * 100)
+        df["amt"] = r["amount"].fillna(df["close"] * df["volume"])
     else:
-        df["amt"] = df["close"] * df["volume"] * 100
+        df["amt"] = df["close"] * df["volume"]
     df["amt20"] = groll(df["amt"], 20, "mean")
     r_open = r["open"].reindex(df.index)
     df["raw_open"] = r_open
