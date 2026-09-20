@@ -10,7 +10,7 @@ import sys
 
 import pandas as pd
 
-FAMILIES = ["raw", "qfq", "hfq"]  # K线三种口径的分片前缀
+FAMILIES = ["raw", "hfq"]  # qfq 已于 2026-09-13 从数据仓移除(信号链路全用 hfq, 见 signals.py)
 META_REQUIRED = ["stock_basic", "index_daily", "bench_daily", "csi1000_daily"]
 
 
@@ -87,12 +87,7 @@ def main():
         dup = df.duplicated(["code", "date"]).sum()
         last = df["date"].max()
         ahead = (last - idx_last).days  # 正=K线领先指数(指数缺日), 负=K线落后指数
-        if fam == "qfq":
-            # qfq 已弃用: 信号链路全用 hfq, daily_update 不再给 qfq 做增量,
-            # 落后属预期, 只查重复行
-            ok, detail, warn = True, (f"{n_shards} 分片 {df['code'].nunique()} 只, 最新 {last:%Y-%m-%d} "
-                                      f"(已弃用, 不再增量, 仅存档)"), False
-        elif ahead > 0:
+        if ahead > 0:
             ok, detail, warn = False, (f"{n_shards} 分片 {df['code'].nunique()} 只, 最新 {last:%Y-%m-%d} "
                                        f"领先指数 {ahead} 天 -> 指数快照缺日, 需补指数"), True
         elif ahead < -4:
